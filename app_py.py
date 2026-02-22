@@ -12,73 +12,56 @@ import pandas as pd
 import base64
 from engine_layer_py import run_analysis, calculate_priority_recommendations
 
-outputs = run_analysis(facilities_gdf, roads_gdf, lga_gdf, outpatient_files, pop_raster)
-
-if outputs is not None:
-    healthcare_deserts, results = outputs
-    # Proceed with the rest of the dashboard...
-else:
-    st.error("The analysis engine failed to return data. Please check your Excel file columns.")
-    
-# --- 1. BACKGROUND IMAGE CONFIGURATION ---
+# --- 1. BACKGROUND CONFIGURATION ---
 def get_base64_of_bin_file(bin_file):
     with open(bin_file, 'rb') as f:
         data = f.read()
     return base64.b64encode(data).decode()
 
 def set_png_as_page_bg(bin_file):
-    bin_str = get_base64_of_bin_file(bin_file)
-    page_bg_img = f'''
-    <style>
-    .stApp {{
-        background-image: url("data:image/png;base64,{bin_str}");
-        background-size: cover;
-        background-position: center;
-        background-attachment: fixed;
-    }}
-    .main {{
-        background-color: rgba(255, 255, 255, 0.85); 
-        padding: 2rem;
-        border-radius: 10px;
-    }}
-    </style>
-    '''
-    st.markdown(page_bg_img, unsafe_allow_html=True)
+    try:
+        bin_str = get_base64_of_bin_file(bin_file)
+        page_bg_img = f'''
+        <style>
+        .stApp {{
+            background-image: url("data:image/png;base64,{bin_str}");
+            background-size: cover;
+        }}
+        .main {{
+            background-color: rgba(255, 255, 255, 0.85); 
+            padding: 2rem;
+            border-radius: 10px;
+        }}
+        </style>
+        '''
+        st.markdown(page_bg_img, unsafe_allow_html=True)
+    except FileNotFoundError:
+        st.warning("Background image not found.")
 
-try:
-    set_png_as_page_bg('background.png')
-except FileNotFoundError:
-    st.warning("Background image not found. Please upload 'background.png' to GitHub.")
+set_png_as_page_bg('background.png')
 
-# --- 2. APP INTERFACE ---
+# --- 2. INTERFACE ---
 st.title("KADUNA STATE HEALTH FACILITY DECISION SUPPORT SYSTEM")
 
 st.sidebar.header("Upload Input Data")
-
-# UPDATED: Added accept_multiple_files=True and support for .xls
-outpatient_files = st.sidebar.file_uploader(
-    "Outpatient Excel (Upload 2019-2024)", 
-    type=['xlsx', 'xls'], 
-    accept_multiple_files=True
-)
-
+outpatient_files = st.sidebar.file_uploader("Outpatient Excel (2019-2024)", type=['xlsx', 'xls'], accept_multiple_files=True)
 health_facilities = st.sidebar.file_uploader("Health Facilities (Zip)", type=['zip'])
 lga_boundary = st.sidebar.file_uploader("Administrative Boundaries (Zip)", type=['zip'])
 roads = st.sidebar.file_uploader("Road Network (Geopackage)", type=['gpkg'])
 pop_raster = st.sidebar.file_uploader("Population Data (TIF)", type=['tif'])
 
-st.sidebar.markdown("---")
-
-# --- 3. ENGINE TRIGGER ---
+# --- 3. THE TRIGGER ---
 if st.sidebar.button("Run Full System Analysis"):
+    # FIX: Check if files exist before processing
     if outpatient_files and health_facilities and lga_boundary and roads and pop_raster:
-        with st.spinner("Analyzing spatial patterns and merging annual data..."):
+        with st.spinner("Processing spatial data..."):
+            # DEFINING THE VARIABLES LOCALLY
             facilities_gdf = gpd.read_file(health_facilities)
             lga_gdf = gpd.read_file(lga_boundary)
             roads_gdf = gpd.read_file(roads)
 
-            # Pass the list of files to the updated engine
-            healthcare_deserts, results = run_analysis(
+            # Now variables are defined, we can call the engine
+            outputs = run_analysis(
                 facilities_gdf, 
                 roads_gdf, 
                 lga_gdf, 
@@ -86,16 +69,18 @@ if st.sidebar.button("Run Full System Analysis"):
                 pop_raster
             )
 
-            priority_df, sites = calculate_priority_recommendations(lga_gdf, healthcare_deserts)
+            if outputs[0] is not None:
+                healthcare_deserts, results = outputs
+                priority_df, sites = calculate_priority_recommendations(lga_gdf, healthcare_deserts)
 
-        st.header("Strategic Resource Allocation")
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            st.subheader("I. LGA Priority Ranking")
-            st.dataframe(priority_df, use_container_width=True)
-        with col2:
-            st.subheader("II. Suggested GPS Locations")
-            st.info("Proposed locations for new primary healthcare centers.")
-            st.table(pd.DataFrame(sites))
+                # --- OUTPUT DASHBOARD ---
+                st.header("Strategic Resource Allocation")
+                col1, col2 = st.columns([2, 1])
+                with col1:
+                    st.subheader("I. LGA Priority Ranking")
+                    st.dataframe(priority_df, use_container_width=True)
+                with col2:
+                    st.subheader("II. Suggested GPS Locations")
+                    st.table(pd.DataFrame(sites))
     else:
-        st.sidebar.error("⚠️ Please upload all required files.")
+        st.sidebar.error("⚠️ Please upload all required files first.")
