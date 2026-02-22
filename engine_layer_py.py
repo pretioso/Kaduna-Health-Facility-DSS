@@ -12,126 +12,50 @@ import geopandas as gpd
 import pandas as pd
 import numpy as np
 import re
-from shapely.geometry import Point
 from esda.moran import Moran
 from libpysal.weights import Queen
 
 def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
-    """
-    Unified Engine: 
-    1. Processes multi-year data and extracts years from filenames.
-    2. Cleans and "Melts" data for temporal trends.
-    3. Performs spatial accessibility gap analysis (Healthcare Deserts).
-    4. Calculates Spatial Autocorrelation (Moran's I) for Hotspot analysis.
-    """
     try:
-        all_data_with_year = []
-        files_to_process = outpatient_files if isinstance(outpatient_files, list) else [outpatient_files]
-
-        # --- PHASE 1: DATA ACQUISITION & CLEANING ---
-        for file in files_to_process:
+        all_data = []
+        files = outpatient_files if isinstance(outpatient_files, list) else [outpatient_files]
+        
+        # 1. Process Multi-year Excel files
+        for file in files:
             engine = 'xlrd' if file.name.endswith('.xls') else 'openpyxl'
             df = pd.read_excel(file, engine=engine)
-            
             if 'Year' not in df.columns:
-                year_match = re.search(r'(\d{4})', file.name)
-                df['Year'] = int(year_match.group(1)) if year_match else 2024
-            
-            all_data_with_year.append(df)
+                match = re.search(r'(\d{4})', file.name)
+                df['Year'] = int(match.group(1)) if match else 2024
+            all_data.append(df)
         
-        if not all_data_with_year:
-            return None, None, "No data loaded."
+        raw_df = pd.concat(all_data, ignore_index=True)
+        raw_df["LGA"] = raw_df["LGA"].astype(str).str.replace("^kd\s+", "", regex=True).str.strip()
+        
+        # 2. Create Long Data for Trends
+        month_cols = [c for c in raw_df.columns if c not in ["LGA", "Year"]]
+        long_data = raw_df.melt(id_vars=["LGA", "Year"], value_vars=month_cols, var_name='Month', value_name='Count')
+        st.session_state['long_data'] = long_data
 
-        merged_data = pd.concat(all_data_with_year, ignore_index=True)
-
-        # Standardize LGA names (Critical for spatial joining)
-        merged_data["LGA"] = (
-            merged_data["LGA"]
-            .astype(str)
-            .str.replace("^kd\s+", "", regex=True)
-            .str.replace("Kaduna State", "State Total", regex=False)
-            .str.strip()
-        )
-
-        # Generate long_data for temporal analysis (Trends)
-        month_cols = [c for c in merged_data.columns if c not in ["LGA", "Year"]]
-        long_data = merged_data.melt(
-            id_vars=["LGA", "Year"], 
-            value_vars=month_cols,
-            var_name='Month', 
-            value_name='Outpatient_Count'
-        )
-        st.session_state['cleaned_long_data'] = long_data
-
-        # --- PHASE 2: SPATIAL ACCESSIBILITY (Healthcare Deserts) ---
+        # 3. Spatial Gap Analysis (30km Buffer)
         facilities_metric = facilities_df.to_crs(epsg=32632)
         coverage_geom = facilities_metric.geometry.buffer(30000).union_all()
         coverage_df = gpd.GeoDataFrame(geometry=[coverage_geom], crs=32632).to_crs(epsg=4326)
+        deserts = gpd.overlay(lga_boundary.to_crs(epsg=4326), coverage_df, how='difference')
 
-        healthcare_deserts = gpd.overlay(
-            lga_boundary.to_crs(epsg=4326),
-            coverage_df,
-            how='difference'
-        )
-
-        # --- PHASE 3: SPATIAL AUTOCORRELATION (Hotspot Analysis Logic) ---
-        # Aggregate by LGA for the latest available year for the heatmap
-        latest_year = merged_data['Year'].max()
-        yearly_agg = merged_data[merged_data['Year'] == latest_year].groupby('LGA').sum(numeric_only=True).sum(axis=1).reset_index()
+        # 4. Moran's I & Heatmap Prep
+        latest_year = raw_df['Year'].max()
+        yearly_agg = raw_df[raw_df['Year'] == latest_year].groupby('LGA').sum(numeric_only=True).sum(axis=1).reset_index()
         yearly_agg.columns = ['LGA', 'Total_Outpatient']
         
-        # Join with boundaries to create the heatmap data source
         name_col = 'NAME_2' if 'NAME_2' in lga_boundary.columns else lga_boundary.columns[0]
         spatial_data = lga_boundary.merge(yearly_agg, left_on=name_col, right_on='LGA')
         
         # Calculate Moran's I
-        try:
-            w = Queen.from_dataframe(spatial_data)
-            moran = Moran(spatial_data['Total_Outpatient'], w)
-            st.session_state['moran_result'] = moran
-        except Exception as spatial_err:
-            st.warning(f"Spatial weights error: {spatial_err}. Check for island polygons.")
+        w = Queen.from_dataframe(spatial_data)
+        moran = Moran(spatial_data['Total_Outpatient'], w)
+        st.session_state['moran_result'] = moran
 
-        return healthcare_deserts, spatial_data, "Spatio-temporal analysis complete."
-
+        return deserts, spatial_data, "Analysis Complete."
     except Exception as e:
-        st.error(f"Critical Engine Error: {str(e)}")
-        return None, None, f"Error: {str(e)}"
-
-def calculate_priority_recommendations(lga_boundary, healthcare_deserts):
-    """
-    Ranks LGAs and suggests new centroids.
-    """
-    try:
-        if healthcare_deserts.empty:
-            return pd.DataFrame(), []
-
-        lga_proj = lga_boundary.to_crs(epsg=32632)
-        deserts_proj = healthcare_deserts.to_crs(epsg=32632)
-
-        priority_data = []
-        name_col = 'NAME_2' if 'NAME_2' in lga_proj.columns else lga_proj.columns[0]
-
-        for _, lga in lga_proj.iterrows():
-            lga_gap = deserts_proj.clip(lga.geometry)
-            gap_area = lga_gap.area.sum() / 1e6 
-            
-            status = "🔴 HIGH" if gap_area > 500 else "🟡 MEDIUM" if gap_area > 150 else "🟢 LOW"
-            priority_data.append({
-                "LGA Name": lga[name_col],
-                "Underserved Area (km²)": round(gap_area, 2),
-                "Priority Status": status
-            })
-
-        priority_df = pd.DataFrame(priority_data).sort_values(by="Underserved Area (km²)", ascending=False)
-
-        deserts_exploded = healthcare_deserts.explode(index_parts=False)
-        top_gaps = deserts_exploded.sort_values(by=deserts_exploded.area, ascending=False).head(3)
-        proposed_sites = [
-            {"Proposed Site": f"Site {i+1}", "Latitude": round(g.centroid.y, 6), "Longitude": round(g.centroid.x, 6)} 
-            for i, g in enumerate(top_gaps.geometry)
-        ]
-
-        return priority_df, proposed_sites
-    except Exception as e:
-        return pd.DataFrame(), []
+        return None, None, f"Engine Error: {str(e)}"
