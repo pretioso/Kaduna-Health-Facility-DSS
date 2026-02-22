@@ -9,62 +9,47 @@ Original file is located at
 import streamlit as st
 import geopandas as gpd
 import pandas as pd
-import matplotlib.pyplot as plt
-# Import the functions from your engine_layer_py.py file
+# Import the engine logic from your other file
 from engine_layer_py import run_analysis, calculate_priority_recommendations
 
 st.set_page_config(page_title="Kaduna Health DSS", layout="wide")
+st.title("Kaduna Health Decision Support System")
 
-st.title("📍 Kaduna Health Decision Support System")
-st.markdown("---")
-
-# --- PHASE 1: INPUT LAYER (Sidebar) ---
-st.sidebar.header("📂 1. Upload Input Data")
-outpatient_file = st.sidebar.file_uploader("Outpatient Excel Data", type=['xlsx'])
-health_facilities_file = st.sidebar.file_uploader("Health Facilities (Zip/SHP)", type=['zip', 'shp'])
-lga_boundary_file = st.sidebar.file_uploader("LGA Boundaries (Zip/SHP)", type=['zip', 'shp'])
+# --- PHASE 1: INPUT LAYER ---
+st.sidebar.header("1. Upload Input Data")
+outpatient_file = st.sidebar.file_uploader("Outpatient Excel", type=['xlsx'])
+health_facilities_file = st.sidebar.file_uploader("Health Facilities (Zip)", type=['zip'])
+lga_boundary_file = st.sidebar.file_uploader("LGA Boundaries (Zip)", type=['zip'])
 roads_file = st.sidebar.file_uploader("Road Network (Geopackage)", type=['gpkg'])
 
-st.sidebar.markdown("---")
-
 # --- PHASE 2: ENGINE TRIGGER ---
-if st.sidebar.button("🚀 Run Strategic Analysis"):
-    # Check if essential files are uploaded
+if st.sidebar.button("Run Full System Analysis"):
     if outpatient_file and health_facilities_file and lga_boundary_file and roads_file:
-        
-        with st.spinner("Processing Spatial Data & Calculating Access..."):
-            # 1. Load data into GeoDataFrames
-            facilities_gdf = gpd.read_file(health_facilities_file)
-            lga_gdf = gpd.read_file(lga_boundary_file)
-            roads_gdf = gpd.read_file(roads_file)
+        # Load data into GeoDataFrames
+        facilities = gpd.read_file(health_facilities_file)
+        lga_bounds = gpd.read_file(lga_boundary_file)
+        roads = gpd.read_file(roads_file)
 
-            # 2. Run the processing engine (This creates the deserts and cleaned data)
-            # Ensure your run_analysis function returns 'deserts'
-            deserts, cleaned_data = run_analysis(facilities_gdf, roads_gdf, lga_gdf, outpatient_file)
-            
-            # 3. Generate Priorities & Site Recommendations
-            priority_df, sites = calculate_priority_recommendations(lga_gdf, deserts)
-
-        # --- PHASE 3: PRIORITY DASHBOARD (Output) ---
-        st.header("📊 Strategic Resource Allocation Results")
+        st.write("Processing Spatial Data... Please wait.")
         
-        # Display KPIs
+        # 1. Run main analysis to generate the healthcare_deserts object
+        # Note: Ensure your run_analysis function returns (healthcare_deserts, results)
+        healthcare_deserts, results = run_analysis(facilities, roads, outpatient_file)
+
+        # 2. Generate priority recommendations using the deserts created above
+        priority_df, sites = calculate_priority_recommendations(lga_bounds, healthcare_deserts)
+
+        # --- PHASE 3: OUTPUT DASHBOARD ---
+        st.header("📍 Strategic Resource Allocation")
+        
         col1, col2 = st.columns(2)
         with col1:
             st.subheader("I. LGA Priority Ranking")
             st.dataframe(priority_df, use_container_width=True)
-            
+
         with col2:
-            st.subheader("II. Suggested GPS Locations")
-            st.info("💡 Proposed PHC placements based on 30km/60-min spacing logic.")
+            st.subheader("II. Suggested GPS Locations (30km Spacing)")
             st.table(pd.DataFrame(sites))
-
-        # Placeholder for Map (You can call a mapping function here)
-        st.success("Analysis Complete! Scroll up to view the prioritized ranking and suggested coordinates.")
-        
+            
     else:
-        st.sidebar.error("⚠️ Please upload ALL required files to begin.")
-
-# --- FOOTER ---
-st.markdown("---")
-st.caption("Developed for Kaduna State Ministry of Health Strategic Planning.")
+        st.error("Please upload all four required files in the sidebar.")
