@@ -22,18 +22,20 @@ from esda.moran import Moran
 
 def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
     """
-    Main analysis engine: Processes multi-year outpatient data and spatial accessibility.
-    Returns: (healthcare_deserts GeoDataFrame, results string/dataframe)
+    Unified Engine: Handles multi-year legacy (.xls) and modern (.xlsx) Excel files,
+    standardizes LGA names, and performs spatial gap analysis.
     """
     try:
         # 1. Load and Merge Multi-Year Outpatient Data
         all_data = []
-        # Ensure we treat input as a list even if only one file is uploaded
         files_to_process = outpatient_files if isinstance(outpatient_files, list) else [outpatient_files]
 
         for file in files_to_process:
-            # read_excel handles .xls and .xlsx automatically
-            df = pd.read_excel(file)
+            # FIX: Explicitly select engine based on file extension to prevent xlrd errors
+            if file.name.endswith('.xls'):
+                df = pd.read_excel(file, engine='xlrd')
+            else:
+                df = pd.read_excel(file, engine='openpyxl')
             all_data.append(df)
         
         if not all_data:
@@ -41,67 +43,62 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
 
         merged_data = pd.concat(all_data, ignore_index=True)
 
-        # 2. Data Cleaning & Melting
-        # We assume the Excel files have columns 'LGA', 'Year', and Month names
-        long_data = merged_data.melt(id_vars=["LGA", 'Year'], var_name='Month', value_name='Outpatient_Count')
-        
-        # Standardize LGA names to match spatial data
-        long_data["LGA"] = (
-            long_data["LGA"]
+        # 2. Data Cleaning & Standardization
+        # Standardize LGA names to match spatial boundary data (removes "kd" prefix and state total rows)
+        merged_data["LGA"] = (
+            merged_data["LGA"]
             .str.replace("^kd\s+", "", regex=True)
             .str.replace("Kaduna State", "State Total", regex=False)
             .str.replace("Local Government Area", "", regex=False)
             .str.strip()
         )
 
-        # 3. Spatial Accessibility (Isochrones)
-        # Projecting to metric system (UTM Zone 32N) for accurate distance calculations
+        # 3. Spatial Accessibility Analysis
+        # Projecting to UTM Zone 32N (EPSG:32632) for accurate metric distance calculations
         roads_metric = roads_df.to_crs(epsg=32632)
         facilities_metric = facilities_df.to_crs(epsg=32632)
         lga_metric = lga_boundary.to_crs(epsg=32632)
 
-        # Simplified Coverage logic: 30km buffer as a proxy for 60-min travel on typical roads
-        # union_all() merges all buffers into a single coverage shape
+        # Create a 30km buffer around all facilities (Proxy for 60-min travel time)
         coverage_60min = facilities_metric.geometry.buffer(30000).union_all()
         coverage_df = gpd.GeoDataFrame(geometry=[coverage_60min], crs=32632).to_crs(epsg=4326)
 
-        # 4. Identifying Healthcare Deserts (LGA area NOT covered by the 60-min buffer)
+        # Identify 'Healthcare Deserts' - regions within LGA boundaries not covered by buffers
         healthcare_deserts = gpd.overlay(
             lga_boundary.to_crs(epsg=4326),
             coverage_df,
             how='difference'
         )
 
-        results = "Analysis Complete: Data merged and accessibility gaps identified."
+        results = "Analysis Complete: All annual datasets merged and spatial gaps calculated."
         
-        # Ensure we return the objects app.py expects
         return healthcare_deserts, results
 
     except Exception as e:
-        # The Safety Net: Prevent app crash by returning empty objects on error
-        st.error(f"Engine Error: {e}")
+        # Safety net to prevent "TypeError: cannot unpack non-iterable NoneType object" in app_py.py
+        st.error(f"Engine Error: {str(e)}")
         return gpd.GeoDataFrame(), f"Error: {str(e)}"
 
 def calculate_priority_recommendations(lga_boundary, healthcare_deserts):
     """
-    Ranks LGAs by underserved area and suggests coordinates for new facilities.
+    Ranks LGAs by underserved area and extracts coordinate centroids for new PHC sites.
     """
     try:
         if healthcare_deserts.empty:
             return pd.DataFrame(), []
 
-        # Project to metric for area calculations (km2)
+        # Project to metric for accurate area (km2) measurements
         lga_proj = lga_boundary.to_crs(epsg=32632)
         deserts_proj = healthcare_deserts.to_crs(epsg=32632)
 
         priority_data = []
-        # Identify the correct name column (NAME_2 is standard for GADM files)
+        # Identify the correct name column (NAME_2 is common for GADM, LGA_NAME for local files)
         name_col = 'NAME_2' if 'NAME_2' in lga_proj.columns else lga_proj.columns[0]
 
         for _, lga in lga_proj.iterrows():
-            # Clip desert area to this specific LGA boundary
+            # Clip desert geometry to the specific LGA boundary
             lga_gap = deserts_proj.clip(lga.geometry)
-            gap_area_km2 = lga_gap.area.sum() / 1e6 # Convert m2 to km2
+            gap_area_km2 = lga_gap.area.sum() / 1e6 # Convert Square Meters to Square Kilometers
 
             status = "🔴 HIGH" if gap_area_km2 > 500 else "🟡 MEDIUM" if gap_area_km2 > 150 else "🟢 LOW"
             
@@ -113,9 +110,8 @@ def calculate_priority_recommendations(lga_boundary, healthcare_deserts):
 
         priority_df = pd.DataFrame(priority_data).sort_values(by="Underserved Area (km²)", ascending=False)
 
-        # 5. Suggested GPS Locations based on desert centroids
+        # Calculate Suggested GPS Locations
         deserts_exploded = healthcare_deserts.explode(index_parts=False)
-        # Select the 5 largest contiguous gaps
         top_5_gaps = deserts_exploded.sort_values(by=deserts_exploded.area, ascending=False).head(5)
 
         proposed_sites = []
@@ -129,5 +125,5 @@ def calculate_priority_recommendations(lga_boundary, healthcare_deserts):
         return priority_df, proposed_sites
 
     except Exception as e:
-        st.error(f"Recommendation Error: {e}")
+        st.error(f"Recommendation Error: {str(e)}")
         return pd.DataFrame(), []
