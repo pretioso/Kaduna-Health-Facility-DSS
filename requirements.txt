@@ -1,0 +1,16 @@
+streamlit
+pandas
+openpyxl
+numpy
+geopandas
+rasterstats
+libpysal
+esda
+networkx
+shapely
+scikit-learn
+matplotlib
+seaborn
+folium
+streamlit-folium
+rasterio
