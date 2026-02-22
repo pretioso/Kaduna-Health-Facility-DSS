@@ -41,36 +41,65 @@ def set_png_as_page_bg(bin_file):
     st.markdown(page_bg_img, unsafe_allow_html=True)
 
 # Call the function with your image filename
-# Ensure 'background.png' is uploaded to the same folder in GitHub
 try:
     set_png_as_page_bg('background.png')
 except FileNotFoundError:
     st.warning("Background image not found. Please upload 'background.png' to GitHub.")
 
-# --- 2. REST OF YOUR APP INTERFACE ---
-st.title("Kaduna Health Decision Support System") #
+# --- 2. APP INTERFACE ---
+st.title("📍 Kaduna Health Decision Support System")
 
-st.sidebar.header("1. Upload Input Data")
+st.sidebar.header("📂 1. Upload Input Data")
+# Standard inputs
 outpatient_file = st.sidebar.file_uploader("Outpatient Excel", type=['xlsx'])
 health_facilities = st.sidebar.file_uploader("Health Facilities (Zip)", type=['zip'])
 lga_boundary = st.sidebar.file_uploader("LGA Boundaries (Zip)", type=['zip'])
 roads = st.sidebar.file_uploader("Road Network (Geopackage)", type=['gpkg'])
 
-if st.sidebar.button("Run Full System Analysis"):
-    if outpatient_file and health_facilities and lga_boundary and roads:
-        facilities_gdf = gpd.read_file(health_facilities)
-        lga_gdf = gpd.read_file(lga_boundary)
-        roads_gdf = gpd.read_file(roads)
+# NEW: Population Raster Input
+pop_raster = st.sidebar.file_uploader("Population Density (TIF)", type=['tif'])
 
-        # 1. Run main analysis to generate the healthcare_deserts object
-        healthcare_deserts, results = run_analysis(facilities_gdf, roads_gdf, lga_gdf, outpatient_file)
+st.sidebar.markdown("---")
 
-        # 2. Generate priority recommendations
-        priority_df, sites = calculate_priority_recommendations(lga_gdf, healthcare_deserts)
+# --- 3. ENGINE TRIGGER ---
+if st.sidebar.button("🚀 Run Full System Analysis"):
+    # Updated check to ensure all five files are present
+    if outpatient_file and health_facilities and lga_boundary and roads and pop_raster:
+        with st.spinner("Analyzing spatial patterns and population density..."):
+            # Load spatial data
+            facilities_gdf = gpd.read_file(health_facilities)
+            lga_gdf = gpd.read_file(lga_boundary)
+            roads_gdf = gpd.read_file(roads)
 
-        st.header("📍 Strategic Resource Allocation") #
-        st.dataframe(priority_df, use_container_width=True)
-        st.subheader("II. Suggested GPS Locations")
-        st.table(pd.DataFrame(sites))
+            # 1. Run main analysis to generate the healthcare_deserts object
+            # Included pop_raster in the arguments
+            healthcare_deserts, results = run_analysis(
+                facilities_gdf, 
+                roads_gdf, 
+                lga_gdf, 
+                outpatient_file, 
+                pop_raster
+            )
+
+            # 2. Generate priority recommendations
+            priority_df, sites = calculate_priority_recommendations(lga_gdf, healthcare_deserts)
+
+        # --- PHASE 4: OUTPUT DASHBOARD ---
+        st.header("📊 Strategic Resource Allocation")
+        
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            st.subheader("I. LGA Priority Ranking")
+            st.dataframe(priority_df, use_container_width=True)
+            
+        with col2:
+            st.subheader("II. Suggested GPS Locations")
+            st.info("Proposed locations for new primary healthcare centers.")
+            st.table(pd.DataFrame(sites))
     else:
-        st.error("Please upload all four required files.")
+        st.sidebar.error("⚠️ Please upload all required files, including the Population TIF.")
+
+# --- FOOTER ---
+st.markdown("---")
+st.caption("Kaduna State Ministry of Health - Strategic Planning Division")
