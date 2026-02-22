@@ -8,122 +8,108 @@ Original file is located at
 """
 
 import streamlit as st
-import matplotlib.pyplot as plt
-import seaborn as sns
 import geopandas as gpd
 import pandas as pd
 import numpy as np
-import networkx as nx
-import libpysal as lp
-from sklearn.neighbors import BallTree
-from shapely.geometry import Point, MultiPoint
-from matplotlib.lines import Line2D
-from esda.moran import Moran
+import re
+from shapely.geometry import Point
 
 def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
     """
-    Unified Engine: Handles multi-year legacy (.xls) and modern (.xlsx) Excel files,
-    standardizes LGA names, and performs spatial gap analysis.
+    Final Unified Engine: Processes multi-year data, extracts years from filenames 
+    if missing, and performs spatial accessibility gap analysis.
     """
     try:
-        # 1. Load and Merge Multi-Year Outpatient Data
         all_data = []
         files_to_process = outpatient_files if isinstance(outpatient_files, list) else [outpatient_files]
 
         for file in files_to_process:
-            # FIX: Explicitly select engine based on file extension to prevent xlrd errors
+            # 1. Load file with correct engine
             if file.name.endswith('.xls'):
                 df = pd.read_excel(file, engine='xlrd')
             else:
                 df = pd.read_excel(file, engine='openpyxl')
+            
+            # 2. Fix 'Year' column if missing
+            if 'Year' not in df.columns:
+                # Extract 4 digits from filename (e.g., '2022' from 'Outpatient_2022.xls')
+                year_match = re.search(r'(\d{4})', file.name)
+                df['Year'] = int(year_match.group(1)) if year_match else 2024
+            
             all_data.append(df)
         
         if not all_data:
-            return gpd.GeoDataFrame(), "No outpatient data uploaded."
+            return gpd.GeoDataFrame(), "No data loaded."
 
         merged_data = pd.concat(all_data, ignore_index=True)
 
-        # 2. Data Cleaning & Standardization
-        # Standardize LGA names to match spatial boundary data (removes "kd" prefix and state total rows)
+        # 3. Standardize columns and LGA names
         merged_data["LGA"] = (
             merged_data["LGA"]
+            .astype(str)
             .str.replace("^kd\s+", "", regex=True)
             .str.replace("Kaduna State", "State Total", regex=False)
-            .str.replace("Local Government Area", "", regex=False)
             .str.strip()
         )
 
-        # 3. Spatial Accessibility Analysis
-        # Projecting to UTM Zone 32N (EPSG:32632) for accurate metric distance calculations
-        roads_metric = roads_df.to_crs(epsg=32632)
+        # 4. Spatial Accessibility (Simplified 30km Buffer)
+        # Projecting to metric system for Kaduna (UTM 32N)
         facilities_metric = facilities_df.to_crs(epsg=32632)
         lga_metric = lga_boundary.to_crs(epsg=32632)
 
-        # Create a 30km buffer around all facilities (Proxy for 60-min travel time)
-        coverage_60min = facilities_metric.geometry.buffer(30000).union_all()
-        coverage_df = gpd.GeoDataFrame(geometry=[coverage_60min], crs=32632).to_crs(epsg=4326)
+        # Create 30km coverage (Proxy for 60-min travel)
+        coverage_geom = facilities_metric.geometry.buffer(30000).union_all()
+        coverage_df = gpd.GeoDataFrame(geometry=[coverage_geom], crs=32632).to_crs(epsg=4326)
 
-        # Identify 'Healthcare Deserts' - regions within LGA boundaries not covered by buffers
+        # Calculate Healthcare Deserts (Areas NOT covered)
         healthcare_deserts = gpd.overlay(
             lga_boundary.to_crs(epsg=4326),
             coverage_df,
             how='difference'
         )
 
-        results = "Analysis Complete: All annual datasets merged and spatial gaps calculated."
-        
-        return healthcare_deserts, results
+        return healthcare_deserts, "Analysis Complete: Data merged and gaps identified."
 
     except Exception as e:
-        # Safety net to prevent "TypeError: cannot unpack non-iterable NoneType object" in app_py.py
-        st.error(f"Engine Error: {str(e)}")
+        st.error(f"Critical Engine Error: {str(e)}")
         return gpd.GeoDataFrame(), f"Error: {str(e)}"
 
 def calculate_priority_recommendations(lga_boundary, healthcare_deserts):
     """
-    Ranks LGAs by underserved area and extracts coordinate centroids for new PHC sites.
+    Ranks LGAs by underserved area.
     """
     try:
         if healthcare_deserts.empty:
-            return pd.DataFrame(), []
+            return pd.DataFrame(columns=["LGA Name", "Underserved Area (km²)", "Priority Status"]), []
 
-        # Project to metric for accurate area (km2) measurements
         lga_proj = lga_boundary.to_crs(epsg=32632)
         deserts_proj = healthcare_deserts.to_crs(epsg=32632)
 
         priority_data = []
-        # Identify the correct name column (NAME_2 is common for GADM, LGA_NAME for local files)
+        # Use first column if NAME_2 isn't found
         name_col = 'NAME_2' if 'NAME_2' in lga_proj.columns else lga_proj.columns[0]
 
         for _, lga in lga_proj.iterrows():
-            # Clip desert geometry to the specific LGA boundary
             lga_gap = deserts_proj.clip(lga.geometry)
-            gap_area_km2 = lga_gap.area.sum() / 1e6 # Convert Square Meters to Square Kilometers
-
-            status = "🔴 HIGH" if gap_area_km2 > 500 else "🟡 MEDIUM" if gap_area_km2 > 150 else "🟢 LOW"
+            gap_area = lga_gap.area.sum() / 1e6 
             
+            status = "🔴 HIGH" if gap_area > 500 else "🟡 MEDIUM" if gap_area > 150 else "🟢 LOW"
             priority_data.append({
                 "LGA Name": lga[name_col],
-                "Underserved Area (km²)": round(gap_area_km2, 2),
+                "Underserved Area (km²)": round(gap_area, 2),
                 "Priority Status": status
             })
 
         priority_df = pd.DataFrame(priority_data).sort_values(by="Underserved Area (km²)", ascending=False)
 
-        # Calculate Suggested GPS Locations
+        # Suggested sites (Top 3 largest gap centroids)
         deserts_exploded = healthcare_deserts.explode(index_parts=False)
-        top_5_gaps = deserts_exploded.sort_values(by=deserts_exploded.area, ascending=False).head(5)
-
-        proposed_sites = []
-        for i, geom in enumerate(top_5_gaps.geometry):
-            proposed_sites.append({
-                "Proposed Site": f"Location {i+1}",
-                "Latitude": round(geom.centroid.y, 6),
-                "Longitude": round(geom.centroid.x, 6)
-            })
+        top_gaps = deserts_exploded.sort_values(by=deserts_exploded.area, ascending=False).head(3)
+        proposed_sites = [{"Proposed Site": f"Site {i+1}", "Latitude": g.centroid.y, "Longitude": g.centroid.x} 
+                          for i, g in enumerate(top_gaps.geometry)]
 
         return priority_df, proposed_sites
 
     except Exception as e:
-        st.error(f"Recommendation Error: {str(e)}")
+        st.error(f"Priority Error: {str(e)}")
         return pd.DataFrame(), []
