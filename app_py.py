@@ -18,27 +18,40 @@ def get_base64_of_bin_file(bin_file):
         data = f.read()
     return base64.b64encode(data).decode()
 
-def set_png_as_page_bg(bin_file):
+def get_base64_of_bin_file(bin_file):
+    with open(bin_file, 'rb') as f:
+        data = f.read()
+    return base64.b64encode(data).decode()
+
+def set_rotated_page_bg(bin_file):
     try:
         bin_str = get_base64_of_bin_file(bin_file)
+        # The CSS below handles the base64 background AND ensures the clouds are "up"
+        # by using background-position: top center and fixed attachment.
         page_bg_img = f'''
         <style>
         .stApp {{
             background-image: url("data:image/png;base64,{bin_str}");
             background-size: cover;
+            background-position: top center; 
+            background-attachment: fixed;
+            background-repeat: no-repeat;
         }}
+        /* Overlay to make the content readable over the background */
         .main {{
             background-color: rgba(255, 255, 255, 0.85); 
             padding: 2rem;
             border-radius: 10px;
+            margin: 20px;
         }}
         </style>
         '''
         st.markdown(page_bg_img, unsafe_allow_html=True)
     except FileNotFoundError:
-        st.warning("Background image not found.")
+        st.warning("Background image 'background.png' not found. Please ensure it is in your GitHub repository.")
 
-set_png_as_page_bg('background.png')
+# Execute the background setup
+set_rotated_page_bg('background.png')
 
 # --- 2. INTERFACE ---
 st.title("KADUNA STATE HEALTH FACILITY DECISION SUPPORT SYSTEM")
