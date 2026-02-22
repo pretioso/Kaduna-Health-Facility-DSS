@@ -10,3 +10,4 @@ libpysal
 esda
 shapely
 networkx
+pyogrio
