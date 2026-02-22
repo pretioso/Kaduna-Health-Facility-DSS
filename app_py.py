@@ -10,7 +10,6 @@ import streamlit as st
 import geopandas as gpd
 import pandas as pd
 import base64
-# Import the engine logic from your other file
 from engine_layer_py import run_analysis, calculate_priority_recommendations
 
 # --- 1. BACKGROUND IMAGE CONFIGURATION ---
@@ -29,8 +28,6 @@ def set_png_as_page_bg(bin_file):
         background-position: center;
         background-attachment: fixed;
     }}
-    
-    /* This makes the content area slightly readable over the image */
     .main {{
         background-color: rgba(255, 255, 255, 0.85); 
         padding: 2rem;
@@ -40,7 +37,6 @@ def set_png_as_page_bg(bin_file):
     '''
     st.markdown(page_bg_img, unsafe_allow_html=True)
 
-# Call the function with your image filename
 try:
     set_png_as_page_bg('background.png')
 except FileNotFoundError:
@@ -50,56 +46,48 @@ except FileNotFoundError:
 st.title("KADUNA STATE HEALTH FACILITY DECISION SUPPORT SYSTEM")
 
 st.sidebar.header("Upload Input Data")
-# Standard inputs
-outpatient_file = st.sidebar.file_uploader("Outpatient Excel", type=['xlsx'])
+
+# UPDATED: Added accept_multiple_files=True and support for .xls
+outpatient_files = st.sidebar.file_uploader(
+    "Outpatient Excel (Upload 2019-2024)", 
+    type=['xlsx', 'xls'], 
+    accept_multiple_files=True
+)
+
 health_facilities = st.sidebar.file_uploader("Health Facilities (Zip)", type=['zip'])
 lga_boundary = st.sidebar.file_uploader("Administrative Boundaries (Zip)", type=['zip'])
 roads = st.sidebar.file_uploader("Road Network (Geopackage)", type=['gpkg'])
-
-# NEW: Population Raster Input
 pop_raster = st.sidebar.file_uploader("Population Data (TIF)", type=['tif'])
 
 st.sidebar.markdown("---")
 
 # --- 3. ENGINE TRIGGER ---
 if st.sidebar.button("Run Full System Analysis"):
-    # Updated check to ensure all five files are present
-    if outpatient_file and health_facilities and lga_boundary and roads and pop_raster:
-        with st.spinner("Analyzing spatial patterns and population density..."):
-            # Load spatial data
+    if outpatient_files and health_facilities and lga_boundary and roads and pop_raster:
+        with st.spinner("Analyzing spatial patterns and merging annual data..."):
             facilities_gdf = gpd.read_file(health_facilities)
             lga_gdf = gpd.read_file(lga_boundary)
             roads_gdf = gpd.read_file(roads)
 
-            # 1. Run main analysis to generate the healthcare_deserts object
-            # Included pop_raster in the arguments
+            # Pass the list of files to the updated engine
             healthcare_deserts, results = run_analysis(
                 facilities_gdf, 
                 roads_gdf, 
                 lga_gdf, 
-                outpatient_file, 
+                outpatient_files, 
                 pop_raster
             )
 
-            # 2. Generate priority recommendations
             priority_df, sites = calculate_priority_recommendations(lga_gdf, healthcare_deserts)
 
-        # --- PHASE 4: OUTPUT DASHBOARD ---
         st.header("Strategic Resource Allocation")
-        
         col1, col2 = st.columns([2, 1])
-        
         with col1:
             st.subheader("I. LGA Priority Ranking")
             st.dataframe(priority_df, use_container_width=True)
-            
         with col2:
             st.subheader("II. Suggested GPS Locations")
             st.info("Proposed locations for new primary healthcare centers.")
             st.table(pd.DataFrame(sites))
     else:
-        st.sidebar.error("⚠️ Please upload all required files, including the Population TIF.")
-
-# --- FOOTER ---
-st.markdown("---")
-st.caption("Kaduna State Ministry of Health - Strategic Planning Division")
+        st.sidebar.error("⚠️ Please upload all required files.")
