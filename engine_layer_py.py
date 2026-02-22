@@ -20,85 +20,114 @@ from shapely.geometry import Point, MultiPoint
 from matplotlib.lines import Line2D
 from esda.moran import Moran
 
-def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_file):
+def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
     """
-    Main analysis engine: Processes outpatient data and spatial accessibility.
+    Main analysis engine: Processes multi-year outpatient data and spatial accessibility.
+    Returns: (healthcare_deserts GeoDataFrame, results string/dataframe)
     """
-    # 1. Load and Clean Outpatient Data
     try:
-        merged_data = pd.read_excel(outpatient_file)
+        # 1. Load and Merge Multi-Year Outpatient Data
+        all_data = []
+        # Ensure we treat input as a list even if only one file is uploaded
+        files_to_process = outpatient_files if isinstance(outpatient_files, list) else [outpatient_files]
+
+        for file in files_to_process:
+            # read_excel handles .xls and .xlsx automatically
+            df = pd.read_excel(file)
+            all_data.append(df)
+        
+        if not all_data:
+            return gpd.GeoDataFrame(), "No outpatient data uploaded."
+
+        merged_data = pd.concat(all_data, ignore_index=True)
+
+        # 2. Data Cleaning & Melting
+        # We assume the Excel files have columns 'LGA', 'Year', and Month names
+        long_data = merged_data.melt(id_vars=["LGA", 'Year'], var_name='Month', value_name='Outpatient_Count')
+        
+        # Standardize LGA names to match spatial data
+        long_data["LGA"] = (
+            long_data["LGA"]
+            .str.replace("^kd\s+", "", regex=True)
+            .str.replace("Kaduna State", "State Total", regex=False)
+            .str.replace("Local Government Area", "", regex=False)
+            .str.strip()
+        )
+
+        # 3. Spatial Accessibility (Isochrones)
+        # Projecting to metric system (UTM Zone 32N) for accurate distance calculations
+        roads_metric = roads_df.to_crs(epsg=32632)
+        facilities_metric = facilities_df.to_crs(epsg=32632)
+        lga_metric = lga_boundary.to_crs(epsg=32632)
+
+        # Simplified Coverage logic: 30km buffer as a proxy for 60-min travel on typical roads
+        # union_all() merges all buffers into a single coverage shape
+        coverage_60min = facilities_metric.geometry.buffer(30000).union_all()
+        coverage_df = gpd.GeoDataFrame(geometry=[coverage_60min], crs=32632).to_crs(epsg=4326)
+
+        # 4. Identifying Healthcare Deserts (LGA area NOT covered by the 60-min buffer)
+        healthcare_deserts = gpd.overlay(
+            lga_boundary.to_crs(epsg=4326),
+            coverage_df,
+            how='difference'
+        )
+
+        results = "Analysis Complete: Data merged and accessibility gaps identified."
+        
+        # Ensure we return the objects app.py expects
+        return healthcare_deserts, results
+
     except Exception as e:
-        st.error(f"Error loading Excel file: {e}")
-        return None, None
-
-    # Melt data to long format
-    long_data = merged_data.melt(id_vars=["LGA", 'Year'], var_name='Month', value_name='Outpatient_Count')
-    
-    # Standardize LGA names
-    long_data["LGA"] = (
-        long_data["LGA"]
-        .str.replace("^kd\s+", "", regex=True)
-        .str.replace("Kaduna State", "State Total", regex=False)
-        .str.replace("Local Government Area", "", regex=False)
-        .str.strip()
-    )
-
-    # 2. Spatial Accessibility (Isochrones)
-    # Projecting to metric system for distance calculations
-    roads_metric = roads_df.to_crs(epsg=32632)
-    facilities_metric = facilities_df.to_crs(epsg=32632)
-    lga_metric = lga_boundary.to_crs(epsg=32632)
-
-    # Simplified Coverage (30km buffer as proxy for 60-min travel)
-    coverage_60min = facilities_metric.geometry.buffer(30000).union_all()
-    coverage_df = gpd.GeoDataFrame(geometry=[coverage_60min], crs=32632).to_crs(epsg=4326)
-
-    # Identifying Healthcare Deserts
-    healthcare_deserts = gpd.overlay(
-        lga_boundary.to_crs(epsg=4326),
-        coverage_df,
-        how='difference'
-    )
-
-    return healthcare_deserts, long_data
+        # The Safety Net: Prevent app crash by returning empty objects on error
+        st.error(f"Engine Error: {e}")
+        return gpd.GeoDataFrame(), f"Error: {str(e)}"
 
 def calculate_priority_recommendations(lga_boundary, healthcare_deserts):
     """
     Ranks LGAs by underserved area and suggests coordinates for new facilities.
     """
-    # Project to metric for area calculations
-    lga_proj = lga_boundary.to_crs(epsg=32632)
-    deserts_proj = healthcare_deserts.to_crs(epsg=32632)
+    try:
+        if healthcare_deserts.empty:
+            return pd.DataFrame(), []
 
-    priority_data = []
-    # Identify the correct name column (NAME_2 or LGA)
-    name_col = 'NAME_2' if 'NAME_2' in lga_proj.columns else lga_proj.columns[0]
+        # Project to metric for area calculations (km2)
+        lga_proj = lga_boundary.to_crs(epsg=32632)
+        deserts_proj = healthcare_deserts.to_crs(epsg=32632)
 
-    for _, lga in lga_proj.iterrows():
-        # Clip desert area to specific LGA
-        lga_gap = deserts_proj.clip(lga.geometry)
-        gap_area_km2 = lga_gap.area.sum() / 1e6
+        priority_data = []
+        # Identify the correct name column (NAME_2 is standard for GADM files)
+        name_col = 'NAME_2' if 'NAME_2' in lga_proj.columns else lga_proj.columns[0]
 
-        status = "🔴 HIGH" if gap_area_km2 > 500 else "🟡 MEDIUM" if gap_area_km2 > 150 else "🟢 LOW"
-        
-        priority_data.append({
-            "LGA Name": lga[name_col],
-            "Underserved Area (km²)": round(gap_area_km2, 2),
-            "Priority Status": status
-        })
+        for _, lga in lga_proj.iterrows():
+            # Clip desert area to this specific LGA boundary
+            lga_gap = deserts_proj.clip(lga.geometry)
+            gap_area_km2 = lga_gap.area.sum() / 1e6 # Convert m2 to km2
 
-    priority_df = pd.DataFrame(priority_data).sort_values(by="Underserved Area (km²)", ascending=False)
+            status = "🔴 HIGH" if gap_area_km2 > 500 else "🟡 MEDIUM" if gap_area_km2 > 150 else "🟢 LOW"
+            
+            priority_data.append({
+                "LGA Name": lga[name_col],
+                "Underserved Area (km²)": round(gap_area_km2, 2),
+                "Priority Status": status
+            })
 
-    # Suggested GPS Locations based on desert centroids
-    deserts_exploded = healthcare_deserts.explode(index_parts=False)
-    top_5_gaps = deserts_exploded.sort_values(by=deserts_exploded.area, ascending=False).head(5)
+        priority_df = pd.DataFrame(priority_data).sort_values(by="Underserved Area (km²)", ascending=False)
 
-    proposed_sites = []
-    for i, geom in enumerate(top_5_gaps.geometry):
-        proposed_sites.append({
-            "Proposed Site": f"Location {i+1}",
-            "Latitude": round(geom.centroid.y, 6),
-            "Longitude": round(geom.centroid.x, 6)
-        })
+        # 5. Suggested GPS Locations based on desert centroids
+        deserts_exploded = healthcare_deserts.explode(index_parts=False)
+        # Select the 5 largest contiguous gaps
+        top_5_gaps = deserts_exploded.sort_values(by=deserts_exploded.area, ascending=False).head(5)
 
-    return priority_df, proposed_sites
+        proposed_sites = []
+        for i, geom in enumerate(top_5_gaps.geometry):
+            proposed_sites.append({
+                "Proposed Site": f"Location {i+1}",
+                "Latitude": round(geom.centroid.y, 6),
+                "Longitude": round(geom.centroid.x, 6)
+            })
+
+        return priority_df, proposed_sites
+
+    except Exception as e:
+        st.error(f"Recommendation Error: {e}")
+        return pd.DataFrame(), []
