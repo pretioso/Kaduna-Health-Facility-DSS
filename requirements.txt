@@ -1,13 +1,12 @@
 streamlit
 pandas
 geopandas
+openpyxl
+xlrd >= 2.0.1
 matplotlib
 seaborn
-numpy
-networkx
 scikit-learn
-shapely
-pysal
 libpysal
 esda
-openpyxl
+shapely
+networkx
