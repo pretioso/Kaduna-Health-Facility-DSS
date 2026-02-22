@@ -9,34 +9,68 @@ Original file is located at
 import streamlit as st
 import geopandas as gpd
 import pandas as pd
-# Use the correct file name for import
+import base64
+# Import the engine logic from your other file
 from engine_layer_py import run_analysis, calculate_priority_recommendations
 
-st.title("Kaduna Health Decision Support System")
+# --- 1. BACKGROUND IMAGE CONFIGURATION ---
+def get_base64_of_bin_file(bin_file):
+    with open(bin_file, 'rb') as f:
+        data = f.read()
+    return base64.b64encode(data).decode()
 
-# Sidebar for all inputs
-st.sidebar.header("Upload Input Data")
+def set_png_as_page_bg(bin_file):
+    bin_str = get_base64_of_bin_file(bin_file)
+    page_bg_img = f'''
+    <style>
+    .stApp {{
+        background-image: url("data:image/png;base64,{bin_str}");
+        background-size: cover;
+        background-position: center;
+        background-attachment: fixed;
+    }}
+    
+    /* This makes the content area slightly readable over the image */
+    .main {{
+        background-color: rgba(255, 255, 255, 0.85); 
+        padding: 2rem;
+        border-radius: 10px;
+    }}
+    </style>
+    '''
+    st.markdown(page_bg_img, unsafe_allow_html=True)
+
+# Call the function with your image filename
+# Ensure 'background.png' is uploaded to the same folder in GitHub
+try:
+    set_png_as_page_bg('background.png')
+except FileNotFoundError:
+    st.warning("Background image not found. Please upload 'background.png' to GitHub.")
+
+# --- 2. REST OF YOUR APP INTERFACE ---
+st.title("Kaduna Health Decision Support System") #
+
+st.sidebar.header("1. Upload Input Data")
 outpatient_file = st.sidebar.file_uploader("Outpatient Excel", type=['xlsx'])
 health_facilities = st.sidebar.file_uploader("Health Facilities (Zip)", type=['zip'])
 lga_boundary = st.sidebar.file_uploader("LGA Boundaries (Zip)", type=['zip'])
 roads = st.sidebar.file_uploader("Road Network (Geopackage)", type=['gpkg'])
 
-if st.sidebar.button("Run Full Analysis"):
+if st.sidebar.button("Run Full System Analysis"):
     if outpatient_file and health_facilities and lga_boundary and roads:
-        # Load the files
         facilities_gdf = gpd.read_file(health_facilities)
         lga_gdf = gpd.read_file(lga_boundary)
         roads_gdf = gpd.read_file(roads)
-        
-        # 1. Run engine to get deserts
-        deserts, status = run_analysis(facilities_gdf, roads_gdf, outpatient_file)
-        
-        # 2. Run recommendations using the output from step 1
-        priority_df, sites = calculate_priority_recommendations(lga_gdf, deserts)
-        
-        st.header("Strategic Resource Allocation")
-        st.dataframe(priority_df)
-        st.subheader("Proposed GPS Locations")
+
+        # 1. Run main analysis to generate the healthcare_deserts object
+        healthcare_deserts, results = run_analysis(facilities_gdf, roads_gdf, lga_gdf, outpatient_file)
+
+        # 2. Generate priority recommendations
+        priority_df, sites = calculate_priority_recommendations(lga_gdf, healthcare_deserts)
+
+        st.header("📍 Strategic Resource Allocation") #
+        st.dataframe(priority_df, use_container_width=True)
+        st.subheader("II. Suggested GPS Locations")
         st.table(pd.DataFrame(sites))
     else:
-        st.error("Please upload all required files.")
+        st.error("Please upload all four required files.")
