@@ -47,9 +47,9 @@ except FileNotFoundError:
     st.warning("Background image not found. Please upload 'background.png' to GitHub.")
 
 # --- 2. APP INTERFACE ---
-st.title("📍 Kaduna Health Decision Support System")
+st.title("KADUNA STATE HEALTH FACILITY DECISION SUPPORT SYSTEM")
 
-st.sidebar.header("📂 1. Upload Input Data")
+st.sidebar.header("Upload Input Data")
 # Standard inputs
 outpatient_file = st.sidebar.file_uploader("Outpatient Excel", type=['xlsx'])
 health_facilities = st.sidebar.file_uploader("Health Facilities (Zip)", type=['zip'])
@@ -62,7 +62,7 @@ pop_raster = st.sidebar.file_uploader("Population Density (TIF)", type=['tif'])
 st.sidebar.markdown("---")
 
 # --- 3. ENGINE TRIGGER ---
-if st.sidebar.button("🚀 Run Full System Analysis"):
+if st.sidebar.button("Run Full System Analysis"):
     # Updated check to ensure all five files are present
     if outpatient_file and health_facilities and lga_boundary and roads and pop_raster:
         with st.spinner("Analyzing spatial patterns and population density..."):
@@ -85,7 +85,7 @@ if st.sidebar.button("🚀 Run Full System Analysis"):
             priority_df, sites = calculate_priority_recommendations(lga_gdf, healthcare_deserts)
 
         # --- PHASE 4: OUTPUT DASHBOARD ---
-        st.header("📊 Strategic Resource Allocation")
+        st.header("Strategic Resource Allocation")
         
         col1, col2 = st.columns([2, 1])
         
