@@ -53,11 +53,11 @@ st.sidebar.header("Upload Input Data")
 # Standard inputs
 outpatient_file = st.sidebar.file_uploader("Outpatient Excel", type=['xlsx'])
 health_facilities = st.sidebar.file_uploader("Health Facilities (Zip)", type=['zip'])
-lga_boundary = st.sidebar.file_uploader("LGA Boundaries (Zip)", type=['zip'])
+lga_boundary = st.sidebar.file_uploader("Administrative Boundaries (Zip)", type=['zip'])
 roads = st.sidebar.file_uploader("Road Network (Geopackage)", type=['gpkg'])
 
 # NEW: Population Raster Input
-pop_raster = st.sidebar.file_uploader("Population Density (TIF)", type=['tif'])
+pop_raster = st.sidebar.file_uploader("Population Data (TIF)", type=['tif'])
 
 st.sidebar.markdown("---")
 
