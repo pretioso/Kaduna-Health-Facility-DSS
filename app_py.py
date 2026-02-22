@@ -12,6 +12,14 @@ import pandas as pd
 import base64
 from engine_layer_py import run_analysis, calculate_priority_recommendations
 
+outputs = run_analysis(facilities_gdf, roads_gdf, lga_gdf, outpatient_files, pop_raster)
+
+if outputs is not None:
+    healthcare_deserts, results = outputs
+    # Proceed with the rest of the dashboard...
+else:
+    st.error("The analysis engine failed to return data. Please check your Excel file columns.")
+    
 # --- 1. BACKGROUND IMAGE CONFIGURATION ---
 def get_base64_of_bin_file(bin_file):
     with open(bin_file, 'rb') as f:
