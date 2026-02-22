@@ -16,23 +16,24 @@ from shapely.geometry import Point
 
 def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
     """
-    Final Unified Engine: Processes multi-year data, extracts years from filenames 
+    Unified Engine: Processes multi-year data, extracts years from filenames 
     if missing, and performs spatial accessibility gap analysis.
     """
     try:
         all_data = []
+        # Ensure we treat input as a list even if only one file is uploaded
         files_to_process = outpatient_files if isinstance(outpatient_files, list) else [outpatient_files]
 
         for file in files_to_process:
-            # 1. Load file with correct engine
+            # 1. Load file with correct engine based on extension
             if file.name.endswith('.xls'):
                 df = pd.read_excel(file, engine='xlrd')
             else:
                 df = pd.read_excel(file, engine='openpyxl')
             
-            # 2. Fix 'Year' column if missing
+            # 2. Fix 'Year' column if missing by extracting from filename
             if 'Year' not in df.columns:
-                # Extract 4 digits from filename (e.g., '2022' from 'Outpatient_2022.xls')
+                # Extracts 4 digits (e.g., '2022' from 'Outpatient_2022.xls')
                 year_match = re.search(r'(\d{4})', file.name)
                 df['Year'] = int(year_match.group(1)) if year_match else 2024
             
@@ -53,15 +54,16 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
         )
 
         # 4. Spatial Accessibility (Simplified 30km Buffer)
-        # Projecting to metric system for Kaduna (UTM 32N)
+        # Projecting to metric system for Kaduna (UTM 32N / EPSG:32632)
         facilities_metric = facilities_df.to_crs(epsg=32632)
         lga_metric = lga_boundary.to_crs(epsg=32632)
 
         # Create 30km coverage (Proxy for 60-min travel)
+        # union_all() ensures we have one continuous coverage shape
         coverage_geom = facilities_metric.geometry.buffer(30000).union_all()
         coverage_df = gpd.GeoDataFrame(geometry=[coverage_geom], crs=32632).to_crs(epsg=4326)
 
-        # Calculate Healthcare Deserts (Areas NOT covered)
+        # Calculate Healthcare Deserts (Areas within LGAs NOT covered by the buffer)
         healthcare_deserts = gpd.overlay(
             lga_boundary.to_crs(epsg=4326),
             coverage_df,
@@ -71,12 +73,13 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
         return healthcare_deserts, "Analysis Complete: Data merged and gaps identified."
 
     except Exception as e:
+        # Safety net to prevent UI crashes if analysis fails
         st.error(f"Critical Engine Error: {str(e)}")
         return gpd.GeoDataFrame(), f"Error: {str(e)}"
 
 def calculate_priority_recommendations(lga_boundary, healthcare_deserts):
     """
-    Ranks LGAs by underserved area.
+    Ranks LGAs by underserved area and identifies optimal centroids for new sites.
     """
     try:
         if healthcare_deserts.empty:
@@ -86,12 +89,12 @@ def calculate_priority_recommendations(lga_boundary, healthcare_deserts):
         deserts_proj = healthcare_deserts.to_crs(epsg=32632)
 
         priority_data = []
-        # Use first column if NAME_2 isn't found
+        # Standard column check for GADM/State boundaries
         name_col = 'NAME_2' if 'NAME_2' in lga_proj.columns else lga_proj.columns[0]
 
         for _, lga in lga_proj.iterrows():
             lga_gap = deserts_proj.clip(lga.geometry)
-            gap_area = lga_gap.area.sum() / 1e6 
+            gap_area = lga_gap.area.sum() / 1e6 # Convert m² to km²
             
             status = "🔴 HIGH" if gap_area > 500 else "🟡 MEDIUM" if gap_area > 150 else "🟢 LOW"
             priority_data.append({
@@ -102,11 +105,13 @@ def calculate_priority_recommendations(lga_boundary, healthcare_deserts):
 
         priority_df = pd.DataFrame(priority_data).sort_values(by="Underserved Area (km²)", ascending=False)
 
-        # Suggested sites (Top 3 largest gap centroids)
+        # Suggested sites: Top 3 largest contiguous gap centroids
         deserts_exploded = healthcare_deserts.explode(index_parts=False)
         top_gaps = deserts_exploded.sort_values(by=deserts_exploded.area, ascending=False).head(3)
-        proposed_sites = [{"Proposed Site": f"Site {i+1}", "Latitude": g.centroid.y, "Longitude": g.centroid.x} 
-                          for i, g in enumerate(top_gaps.geometry)]
+        proposed_sites = [
+            {"Proposed Site": f"Site {i+1}", "Latitude": round(g.centroid.y, 6), "Longitude": round(g.centroid.x, 6)} 
+            for i, g in enumerate(top_gaps.geometry)
+        ]
 
         return priority_df, proposed_sites
 
