@@ -16,35 +16,36 @@ from shapely.geometry import Point
 
 def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
     """
-    Unified Engine: Processes multi-year data, extracts years from filenames 
-    if missing, and performs spatial accessibility gap analysis.
+    Unified Engine: 
+    1. Processes multi-year Excel data (.xls/.xlsx).
+    2. Extracts years from filenames if missing.
+    3. Cleans and "Melts" data for temporal analysis (long_data).
+    4. Performs spatial accessibility gap analysis (Healthcare Deserts).
     """
     try:
-        all_data = []
+        all_data_with_year = []
         # Ensure we treat input as a list even if only one file is uploaded
         files_to_process = outpatient_files if isinstance(outpatient_files, list) else [outpatient_files]
 
+        # --- PHASE 1: DATA ACQUISITION & CLEANING (From Notebook) ---
         for file in files_to_process:
-            # 1. Load file with correct engine based on extension
-            if file.name.endswith('.xls'):
-                df = pd.read_excel(file, engine='xlrd')
-            else:
-                df = pd.read_excel(file, engine='openpyxl')
+            # Load file with correct engine based on extension
+            engine = 'xlrd' if file.name.endswith('.xls') else 'openpyxl'
+            df = pd.read_excel(file, engine=engine)
             
-            # 2. Fix 'Year' column if missing by extracting from filename
+            # Fix 'Year' column if missing by extracting from filename (e.g., '2022' from 'Outpatient_2022.xls')
             if 'Year' not in df.columns:
-                # Extracts 4 digits (e.g., '2022' from 'Outpatient_2022.xls')
                 year_match = re.search(r'(\d{4})', file.name)
                 df['Year'] = int(year_match.group(1)) if year_match else 2024
             
-            all_data.append(df)
+            all_data_with_year.append(df)
         
-        if not all_data:
+        if not all_data_with_year:
             return gpd.GeoDataFrame(), "No data loaded."
 
-        merged_data = pd.concat(all_data, ignore_index=True)
+        merged_data = pd.concat(all_data_with_year, ignore_index=True)
 
-        # 3. Standardize columns and LGA names
+        # Standardize LGA names (Matches logic in notebook)
         merged_data["LGA"] = (
             merged_data["LGA"]
             .astype(str)
@@ -53,33 +54,44 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
             .str.strip()
         )
 
-        # 4. Spatial Accessibility (Simplified 30km Buffer)
-        # Projecting to metric system for Kaduna (UTM 32N / EPSG:32632)
+        # Generate long_data for temporal analysis (Melting months)
+        month_cols = [c for c in merged_data.columns if c not in ["LGA", "Year"]]
+        long_data = merged_data.melt(
+            id_vars=["LGA", "Year"], 
+            value_vars=month_cols,
+            var_name='Month', 
+            value_name='Outpatient_Count'
+        )
+        
+        # Store long_data in session state so it can be used for trend charts in the UI
+        st.session_state['cleaned_long_data'] = long_data
+
+        # --- PHASE 2: SPATIAL ACCESSIBILITY (Healthcare Deserts) ---
+        # Projecting to UTM Zone 32N (EPSG:32632) for accurate metric distance
         facilities_metric = facilities_df.to_crs(epsg=32632)
         lga_metric = lga_boundary.to_crs(epsg=32632)
 
-        # Create 30km coverage (Proxy for 60-min travel)
-        # union_all() ensures we have one continuous coverage shape
+        # Create 30km coverage (Proxy for 60-min travel distance)
+        # buffer(30000) = 30 kilometers
         coverage_geom = facilities_metric.geometry.buffer(30000).union_all()
         coverage_df = gpd.GeoDataFrame(geometry=[coverage_geom], crs=32632).to_crs(epsg=4326)
 
-        # Calculate Healthcare Deserts (Areas within LGAs NOT covered by the buffer)
+        # Identify Healthcare Deserts (LGA regions NOT covered by a facility buffer)
         healthcare_deserts = gpd.overlay(
             lga_boundary.to_crs(epsg=4326),
             coverage_df,
             how='difference'
         )
 
-        return healthcare_deserts, "Analysis Complete: Data merged and gaps identified."
+        return healthcare_deserts, "Analysis Complete: Data cleaned, merged, and gaps identified."
 
     except Exception as e:
-        # Safety net to prevent UI crashes if analysis fails
         st.error(f"Critical Engine Error: {str(e)}")
         return gpd.GeoDataFrame(), f"Error: {str(e)}"
 
 def calculate_priority_recommendations(lga_boundary, healthcare_deserts):
     """
-    Ranks LGAs by underserved area and identifies optimal centroids for new sites.
+    Ranks LGAs based on the total area of 'Healthcare Deserts' found within them.
     """
     try:
         if healthcare_deserts.empty:
@@ -89,7 +101,7 @@ def calculate_priority_recommendations(lga_boundary, healthcare_deserts):
         deserts_proj = healthcare_deserts.to_crs(epsg=32632)
 
         priority_data = []
-        # Standard column check for GADM/State boundaries
+        # Attempt to find standard GADM name column, fallback to first column
         name_col = 'NAME_2' if 'NAME_2' in lga_proj.columns else lga_proj.columns[0]
 
         for _, lga in lga_proj.iterrows():
@@ -105,7 +117,7 @@ def calculate_priority_recommendations(lga_boundary, healthcare_deserts):
 
         priority_df = pd.DataFrame(priority_data).sort_values(by="Underserved Area (km²)", ascending=False)
 
-        # Suggested sites: Top 3 largest contiguous gap centroids
+        # Suggest Site Locations: Using centroids of the top 3 largest gap polygons
         deserts_exploded = healthcare_deserts.explode(index_parts=False)
         top_gaps = deserts_exploded.sort_values(by=deserts_exploded.area, ascending=False).head(3)
         proposed_sites = [
@@ -115,6 +127,9 @@ def calculate_priority_recommendations(lga_boundary, healthcare_deserts):
 
         return priority_df, proposed_sites
 
+    except Exception as e:
+        st.error(f"Priority Error: {str(e)}")
+        return pd.DataFrame(), []
     except Exception as e:
         st.error(f"Priority Error: {str(e)}")
         return pd.DataFrame(), []
