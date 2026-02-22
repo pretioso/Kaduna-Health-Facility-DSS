@@ -10,34 +10,31 @@ import streamlit as st
 import geopandas as gpd
 import pandas as pd
 import base64
+import os
+# Ensure engine_layer_py.py is in the same GitHub folder
 from engine_layer_py import run_analysis, calculate_priority_recommendations
 
 # --- 1. BACKGROUND CONFIGURATION ---
 def get_base64_of_bin_file(bin_file):
-    with open(bin_file, 'rb') as f:
-        data = f.read()
-    return base64.b64encode(data).decode()
-
-def get_base64_of_bin_file(bin_file):
+    """Encodes local image to base64 for CSS injection."""
     with open(bin_file, 'rb') as f:
         data = f.read()
     return base64.b64encode(data).decode()
 
 def set_rotated_page_bg(bin_file):
+    """Sets background with 'top center' positioning to ensure clouds are at the top."""
     try:
         bin_str = get_base64_of_bin_file(bin_file)
-        # The CSS below handles the base64 background AND ensures the clouds are "up"
-        # by using background-position: top center and fixed attachment.
         page_bg_img = f'''
         <style>
         .stApp {{
             background-image: url("data:image/png;base64,{bin_str}");
             background-size: cover;
-            background-position: top center; 
+            background-position: top center; /* Fixes cloud orientation */
             background-attachment: fixed;
             background-repeat: no-repeat;
         }}
-        /* Overlay to make the content readable over the background */
+        /* Semi-transparent overlay to ensure text readability over background */
         .main {{
             background-color: rgba(255, 255, 255, 0.85); 
             padding: 2rem;
@@ -48,52 +45,67 @@ def set_rotated_page_bg(bin_file):
         '''
         st.markdown(page_bg_img, unsafe_allow_html=True)
     except FileNotFoundError:
-        st.warning("Background image 'background.png' not found. Please ensure it is in your GitHub repository.")
+        st.warning("Background image 'background.png' not found in root directory.")
 
-# Execute the background setup
+# Execute background setup
 set_rotated_page_bg('background.png')
 
 # --- 2. INTERFACE ---
 st.title("KADUNA STATE HEALTH FACILITY DECISION SUPPORT SYSTEM")
 
 st.sidebar.header("Upload Input Data")
+# accept_multiple_files=True allows processing the 6 years of data from your notebook
 outpatient_files = st.sidebar.file_uploader("Outpatient Dataset", type=['xlsx', 'xls'], accept_multiple_files=True)
-health_facilities = st.sidebar.file_uploader("Health Facilities (Zip)", type=['zip'])
-lga_boundary = st.sidebar.file_uploader("Administrative Boundaries (Zip)", type=['zip'])
+health_facilities = st.sidebar.file_uploader("Health Facilities (Zip/Shapefile)", type=['zip', 'shp'])
+lga_boundary = st.sidebar.file_uploader("Administrative Boundaries (Zip/Shapefile)", type=['zip', 'shp'])
 roads = st.sidebar.file_uploader("Road Network (Geopackage)", type=['gpkg'])
 pop_raster = st.sidebar.file_uploader("Population Data (TIF)", type=['tif'])
 
-# --- 3. THE TRIGGER ---
+# --- 3. ANALYSIS TRIGGER ---
 if st.sidebar.button("Run Full System Analysis"):
-    # FIX: Check if files exist before processing
+    # Check if all 5 required inputs exist
     if outpatient_files and health_facilities and lga_boundary and roads and pop_raster:
-        with st.spinner("Processing spatial data..."):
-            # DEFINING THE VARIABLES LOCALLY
-            facilities_gdf = gpd.read_file(health_facilities)
-            lga_gdf = gpd.read_file(lga_boundary)
-            roads_gdf = gpd.read_file(roads)
+        with st.spinner("Processing spatial data and cleaning temporal records..."):
+            try:
+                # Load spatial files into GeoDataFrames
+                facilities_gdf = gpd.read_file(health_facilities)
+                lga_gdf = gpd.read_file(lga_boundary)
+                roads_gdf = gpd.read_file(roads)
 
-            # Now variables are defined, we can call the engine
-            outputs = run_analysis(
-                facilities_gdf, 
-                roads_gdf, 
-                lga_gdf, 
-                outpatient_files, 
-                pop_raster
-            )
+                # Call the unified engine
+                # This handles the Year extraction and LGA cleaning logic from your notebook
+                healthcare_deserts, status_msg = run_analysis(
+                    facilities_df=facilities_gdf, 
+                    roads_df=roads_gdf, 
+                    lga_boundary=lga_gdf, 
+                    outpatient_files=outpatient_files, 
+                    population_tif=pop_raster
+                )
 
-            if outputs[0] is not None:
-                healthcare_deserts, results = outputs
-                priority_df, sites = calculate_priority_recommendations(lga_gdf, healthcare_deserts)
+                if not healthcare_deserts.empty:
+                    # Calculate Rankings and GPS locations for new sites
+                    priority_df, sites = calculate_priority_recommendations(lga_gdf, healthcare_deserts)
 
-                # --- OUTPUT DASHBOARD ---
-                st.header("Strategic Resource Allocation")
-                col1, col2 = st.columns([2, 1])
-                with col1:
-                    st.subheader("I. LGA Priority Ranking")
-                    st.dataframe(priority_df, use_container_width=True)
-                with col2:
-                    st.subheader("II. Suggested GPS Locations")
-                    st.table(pd.DataFrame(sites))
+                    # --- 4. OUTPUT DASHBOARD ---
+                    st.success(status_msg)
+                    st.header("Strategic Resource Allocation")
+                    
+                    col1, col2 = st.columns([2, 1])
+                    with col1:
+                        st.subheader("I. LGA Priority Ranking")
+                        # Priority ranking based on underserved area (km2)
+                        st.dataframe(priority_df, use_container_width=True)
+                    
+                    with col2:
+                        st.subheader("II. Suggested GPS Locations")
+                        if sites:
+                            st.table(pd.DataFrame(sites))
+                        else:
+                            st.info("No major gaps identified for new site suggestions.")
+                else:
+                    st.error("Spatial analysis failed to identify underserved areas. Check your coordinate systems.")
+
+            except Exception as e:
+                st.error(f"Error during file processing: {str(e)}")
     else:
-        st.sidebar.error("⚠️ Please upload all required files first.")
+        st.sidebar.error("⚠️ Please upload all required files (Outpatient, Facilities, Boundaries, Roads, and Population) first.")
