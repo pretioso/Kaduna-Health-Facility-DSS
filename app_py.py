@@ -44,7 +44,7 @@ set_png_as_page_bg('background.png')
 st.title("KADUNA STATE HEALTH FACILITY DECISION SUPPORT SYSTEM")
 
 st.sidebar.header("Upload Input Data")
-outpatient_files = st.sidebar.file_uploader("Outpatient Excel (2019-2024)", type=['xlsx', 'xls'], accept_multiple_files=True)
+outpatient_files = st.sidebar.file_uploader("Outpatient Dataset", type=['xlsx', 'xls'], accept_multiple_files=True)
 health_facilities = st.sidebar.file_uploader("Health Facilities (Zip)", type=['zip'])
 lga_boundary = st.sidebar.file_uploader("Administrative Boundaries (Zip)", type=['zip'])
 roads = st.sidebar.file_uploader("Road Network (Geopackage)", type=['gpkg'])
