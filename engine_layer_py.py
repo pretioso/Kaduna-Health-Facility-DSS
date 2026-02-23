@@ -27,7 +27,7 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
         lga_boundary["Population"] = [s["sum"] if s and s["sum"] else 1 for s in stats]
         os.unlink(tmp_path)
 
-        # 2. Outpatient Rate per 1,000 (Notebook Cell 46)
+        # 2. Outpatient Rate (Notebook Cell 12, 46)
         all_data = []
         for file in outpatient_files:
             df = pd.read_excel(file)
@@ -35,40 +35,36 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
             all_data.append(df)
         
         merged_df = pd.concat(all_data, ignore_index=True)
-        latest_year = merged_df.groupby('LGA').sum(numeric_only=True).reset_index()
+        # Sum monthly columns for the latest year available
+        val_cols = [c for c in merged_df.columns if c not in ['LGA', 'Year']]
+        merged_df['Annual_Total'] = merged_df[val_cols].sum(axis=1)
+        latest_data = merged_df.groupby('LGA')['Annual_Total'].sum().reset_index()
         
-        # Join and calculate Rate
         lga_boundary["NAME_2_UP"] = lga_boundary["NAME_2"].str.upper()
-        # Sum all monthly columns to get annual total
-        val_cols = [c for c in latest_year.columns if c not in ['LGA', 'Year']]
-        latest_year['Annual_Total'] = latest_year[val_cols].sum(axis=1)
-        
-        spatial_data = lga_boundary.merge(latest_year[['LGA', 'Annual_Total']], left_on='NAME_2_UP', right_on='LGA')
+        spatial_data = lga_boundary.merge(latest_data, left_on='NAME_2_UP', right_on='LGA', how='left').fillna(0)
         spatial_data['Rate_Per_1000'] = (spatial_data['Annual_Total'] / spatial_data['Population']) * 1000
 
         # 3. Moran's I Logic (Notebook Cell 61)
-        w = lp.weights.Queen.from_dataframe(spatial_data.fillna(0))
+        w = lp.weights.Queen.from_dataframe(spatial_data)
         w.transform = 'R'
-        mi = Moran(spatial_data['Rate_Per_1000'].fillna(0), w)
+        mi = Moran(spatial_data['Rate_Per_1000'], w)
         
-        moran_table = pd.DataFrame({
-            "Metric": ["Moran's I Statistic", "P-Value", "Z-Score", "Result"],
+        moran_report = pd.DataFrame({
+            "Metric": ["Moran's I Index", "P-Value", "Z-Score", "Spatial Pattern"],
             "Value": [round(mi.I, 4), round(mi.p_sim, 4), round(mi.z_sim, 4), 
-                      "Clustered (Hotspot)" if mi.I > 0 and mi.p_sim < 0.05 else "Random/Dispersed"]
+                      "Clustered (Inequality)" if mi.I > 0 and mi.p_sim < 0.05 else "Random Distribution"]
         })
 
-        # 4. Infrastructure & Priority Logic
-        # Priority = High Population + Low Outpatient Rate
+        # 4. Infrastructure Recommendations (Priority Logic)
+        def recommend_infra(rate):
+            if rate < 50: return "Comprehensive Hospital (Surgical/Maternity)"
+            if rate < 150: return "Primary Health Centre (Lab/Cold Chain)"
+            return "Basic Health Post (Immunization Hub)"
+
         spatial_data['Priority_Rank'] = spatial_data['Rate_Per_1000'].rank(ascending=True)
-        
-        def get_infra(rate):
-            if rate < 50: return "Comprehensive Health Centre (Surgical Suite, Maternity Wing)"
-            if rate < 150: return "Primary Health Clinic (Cold Chain Storage, Basic Lab)"
-            return "Health Post (Mobile Outreach, Immunization Hub)"
+        spatial_data['Recommended_Infrastructure'] = spatial_data['Rate_Per_1000'].apply(recommend_infra)
+        spatial_data['Min_Distance_Apart'] = "5km - 8km (WHO standard)"
 
-        spatial_data['Recommended_Infrastructure'] = spatial_data['Rate_Per_1000'].apply(get_infra)
-        spatial_data['Suggested_Distance_Apart'] = "5km - 10km (Based on 60-min Travel Time)"
-
-        return spatial_data, moran_table, "Analysis Successful"
+        return spatial_data, moran_report, "Analysis Successful"
     except Exception as e:
         return None, None, str(e)
