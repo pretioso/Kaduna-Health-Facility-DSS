@@ -26,7 +26,6 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
             tmp_path = tmp.name
         
         stats = zonal_stats(lga_boundary, tmp_path, stats=["sum"])
-        # Ensure 'NAME_2' exists; if not, use the first string column found
         lga_col = 'NAME_2' if 'NAME_2' in lga_boundary.columns else lga_boundary.select_dtypes(include=['object']).columns[0]
         lga_boundary["Population"] = [s["sum"] if s and s["sum"] else 1 for s in stats]
         os.unlink(tmp_path)
@@ -45,9 +44,9 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
         
         raw_df = pd.concat(all_data, ignore_index=True)
         
-        # Flexibly find month columns (handles Jan or January)
-        all_cols = raw_df.columns.tolist()
-        month_cols = [c for c in all_cols if c.startswith(('Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'))]
+        # Find month columns
+        month_keywords = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+        month_cols = [c for c in raw_df.columns if any(k in str(c) for k in month_keywords)]
         
         annual_maps = {}
         for yr in sorted(raw_df['Year'].unique()):
@@ -58,22 +57,28 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
             merged[f'Rate_{yr}'] = (merged['Annual_Sum'] / merged['Population']) * 1000
             annual_maps[yr] = merged
 
-        # --- 3. SEASONAL ANALYSIS ---
+        # --- 3. ROBUST SEASONAL ANALYSIS ---
         long_df = raw_df.melt(id_vars=["LGA", "Year"], value_vars=month_cols, var_name='Month', value_name='Count')
         long_df = long_df.merge(lga_boundary[['NAME_2_UP', 'Population']], left_on='LGA', right_on='NAME_2_UP')
         long_df['Rate'] = (long_df['Count'] / long_df['Population']) * 1000
         
         def get_season(m):
-            m = m.lower()
+            m = str(m).lower()
             if any(x in m for x in ["nov", "dec", "jan", "feb"]): return "Harmattan"
             if any(x in m for x in ["mar", "apr"]): return "Hot-Dry"
             return "Rainy Season"
         
         long_df['Season'] = long_df['Month'].apply(get_season)
         seasonal_table = long_df.groupby(['LGA', 'Season'])['Rate'].mean().unstack().reset_index()
-        seasonal_table['Seasonal Peak'] = seasonal_table[['Harmattan', 'Hot-Dry', 'Rainy Season']].idxmax(axis=1)
+        
+        # Check which seasons actually exist in the data to avoid Index Error
+        available_seasons = [s for s in ['Harmattan', 'Hot-Dry', 'Rainy Season'] if s in seasonal_table.columns]
+        if available_seasons:
+            seasonal_table['Seasonal Peak'] = seasonal_table[available_seasons].idxmax(axis=1)
+        else:
+            seasonal_table['Seasonal Peak'] = "Insufficient Data"
 
-        # --- 4. MORAN'S I (Target: -0.2554) ---
+        # --- 4. MORAN'S I ---
         latest_year = max(annual_maps.keys())
         latest_map = annual_maps[latest_year]
         w = lp.weights.Queen.from_dataframe(latest_map)
@@ -81,9 +86,10 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
         mi = Moran(latest_map[f'Rate_{latest_year}'], w)
 
         # --- 5. DESERTS ---
+        lga_metric = lga_boundary.to_crs(epsg=32632)
         facilities_metric = facilities_df.to_crs(epsg=32632)
         coverage = facilities_metric.buffer(30000).union_all()
-        deserts = gpd.overlay(lga_boundary.to_crs(epsg=32632), gpd.GeoDataFrame(geometry=[coverage], crs=32632), how='difference')
+        deserts = gpd.overlay(lga_metric, gpd.GeoDataFrame(geometry=[coverage], crs=32632), how='difference')
         
         return annual_maps, seasonal_table, mi, deserts, lga_boundary
     except Exception as e:
