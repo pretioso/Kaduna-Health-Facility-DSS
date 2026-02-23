@@ -8,52 +8,85 @@ Original file is located at
 """
 import streamlit as st
 import geopandas as gpd
+import pandas as pd
+import base64
 import matplotlib.pyplot as plt
 import seaborn as sns
 from engine_layer_py import run_analysis
 
-# 1. Page Config & Persistence
-st.set_page_config(layout="wide")
-if 'analysis_results' not in st.session_state:
-    st.session_state['analysis_results'] = None
+# 1. Background Fix (Clouds at Top)
+def set_bg(bin_file):
+    try:
+        with open(bin_file, 'rb') as f:
+            bin_str = base64.b64encode(f.read()).decode()
+        st.markdown(f'''
+            <style>
+            .stApp {{
+                background-image: url("data:image/png;base64,{bin_str}");
+                background-size: cover;
+                background-position: top center; 
+                background-attachment: fixed;
+            }}
+            .main {{ background-color: rgba(255, 255, 255, 0.88); padding: 2rem; border-radius: 15px; }}
+            </style>
+            ''', unsafe_allow_html=True)
+    except: pass
 
-st.title("KADUNA HEALTH ANALYTICS")
+set_bg('background.png')
 
-# 2. Sidebar Uploads
+# 2. State Management
+if 'results' not in st.session_state: st.session_state.results = None
+
+st.title("KADUNA HEALTH FACILITY DECISION SUPPORT SYSTEM")
+
+# 3. Sidebar
 with st.sidebar:
-    out_f = st.file_uploader("Outpatient Files", accept_multiple_files=True)
-    fac_f = st.file_uploader("Facilities (Zip)", type=['zip'])
-    lga_f = st.file_uploader("Boundaries (Zip)", type=['zip'])
+    st.header("Upload Datasets")
+    out_files = st.file_uploader("Outpatient Data (xls/xlsx)", accept_multiple_files=True)
+    fac_file = st.file_uploader("Facilities (Zip)", type=['zip'])
+    lga_file = st.file_uploader("LGA Boundary (Zip)", type=['zip'])
+    road_file = st.file_uploader("Road Network (gpkg)", type=['gpkg'])
+    pop_file = st.file_uploader("Population Raster (tif)", type=['tif'])
     
-    if st.button("Run Full Analysis"):
-        if out_f and fac_f and lga_f:
-            with st.spinner("Processing..."):
-                res, msg = run_analysis(gpd.read_file(fac_f), None, gpd.read_file(lga_f), out_f)
-                st.session_state['analysis_results'] = res
-                st.session_state['msg'] = msg
-        else:
-            st.error("Please upload all files first.")
+    run_btn = st.button("🚀 Run Full System Analysis")
 
-# 3. Persistent Output Rendering
-if st.session_state['analysis_results'] is not None:
-    spatial_data = st.session_state['analysis_results']
-    st.success(st.session_state['msg'])
+if run_btn:
+    if all([out_files, fac_file, lga_file, road_file, pop_file]):
+        with st.spinner("Analyzing Road Networks & Population..."):
+            res = run_analysis(gpd.read_file(fac_file), gpd.read_file(road_file), gpd.read_file(lga_file), out_files, pop_file)
+            st.session_state.results = res
+    else:
+        st.error("Missing files! Please upload all 5 datasets.")
 
-    col1, col2 = st.columns(2)
+# 4. Display Outputs
+if st.session_state.results:
+    deserts, spatial_data, msg = st.session_state.results
+    st.success(msg)
 
-    with col1:
-        st.subheader("I. Heatmap")
-        fig, ax = plt.subplots()
-        spatial_data.plot(column='Total_Outpatient', cmap='OrRd', legend=True, ax=ax)
+    tab1, tab2, tab3 = st.tabs(["🌍 Heatmaps & Deserts", "📈 Trends", "📊 Statistics"])
+
+    with tab1:
+        st.subheader("Outpatient Attendance Rate Heatmap")
+        fig, ax = plt.subplots(figsize=(10, 6))
+        spatial_data.plot(column='Attendance_Rate', cmap='OrRd', legend=True, ax=ax)
         st.pyplot(fig)
-
-    with col2:
-        st.subheader("II. LGA Trends")
-        long_data = st.session_state['long_data']
-        lga = st.selectbox("Choose LGA", sorted(long_data['LGA'].unique()))
-        fig2, ax2 = plt.subplots()
-        sns.lineplot(data=long_data[long_data['LGA']==lga], x='Year', y='Count', marker='o', ax=ax2)
+        
+        st.subheader("Healthcare Deserts (Gaps)")
+        fig2, ax2 = plt.subplots(figsize=(10, 6))
+        spatial_data.boundary.plot(ax=ax2, color='gray', alpha=0.5)
+        deserts.plot(ax=ax2, color='red', alpha=0.6)
         st.pyplot(fig2)
 
-    st.subheader("III. Hotspot Statistics")
-    st.metric("Global Moran's I", round(st.session_state['moran_result'].I, 3))
+    with tab2:
+        long_data = st.session_state.long_data
+        lga = st.selectbox("Select LGA for Trend", sorted(long_data['LGA'].unique()))
+        fig3, ax3 = plt.subplots(figsize=(10, 4))
+        sns.lineplot(data=long_data[long_data['LGA']==lga], x='Year', y='Outpatient_Count', marker='o', ax=ax3)
+        st.pyplot(fig3)
+
+    with tab3:
+        mi = st.session_state.moran_result
+        st.metric("Global Moran's I Statistic", round(mi.I, 4))
+        st.write(f"P-value: {mi.p_sim:.4f}")
+        conclusion = "Clustered" if mi.p_sim < 0.05 and mi.I > 0 else "Random"
+        st.info(f"The spatial pattern is: **{conclusion}**")
