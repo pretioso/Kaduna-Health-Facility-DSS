@@ -12,13 +12,54 @@ import geopandas as gpd
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import base64
 from engine_layer_py import run_analysis
 
+# --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Kaduna Health Research Report")
 
-# --- UI STYLING ---
-st.markdown("""<style> .main { background-color: #f8f9fa; } .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; border: 1px solid #dee2e6; } </style>""", unsafe_allow_html=True)
+# --- BACKGROUND IMAGE HELPER ---
+def get_base64_of_bin_file(bin_file):
+    with open(bin_file, 'rb') as f:
+        data = f.read()
+    return base64.b64encode(data).decode()
 
+def set_png_as_page_bg(bin_file):
+    bin_str = get_base64_of_bin_file(bin_file)
+    page_bg_img = f'''
+    <style>
+    .stApp {{
+        background-image: url("data:image/png;base64,{bin_str}");
+        background-size: cover;
+        background-position: top center;
+        background-attachment: fixed;
+    }}
+    /* Adding a slight overlay to the main container for readability */
+    .main {{
+        background-color: rgba(248, 249, 250, 0.9);
+        padding: 30px;
+        border-radius: 15px;
+    }}
+    .stMetric {{
+        background-color: #ffffff;
+        padding: 15px;
+        border-radius: 10px;
+        border: 1px solid #dee2e6;
+    }}
+    </style>
+    '''
+    st.markdown(page_bg_img, unsafe_allow_html=True)
+
+# Apply the background (ensure background.png is in the same folder)
+try:
+    set_png_as_page_bg('background.png')
+except FileNotFoundError:
+    st.warning("Background image not found. Please ensure 'background.png' is in the project directory.")
+
+# --- TITLE ---
+st.title("KADUNA STATE STRATEGIC HEALTH INTELLIGENCE")
+
+# --- SIDEBAR ---
 with st.sidebar:
     st.title("Project Data Portal")
     outs = st.file_uploader("Outpatient Data", accept_multiple_files=True)
@@ -28,57 +69,59 @@ with st.sidebar:
     pops = st.file_uploader("Population (tif)", type=['tif'])
     run = st.button("Generate Research Report")
 
+# --- ANALYSIS EXECUTION ---
 if run and all([outs, facs, lgas, roads, pops]):
     annual_maps, seasonal_table, mi, deserts, pop_map = run_analysis(
         gpd.read_file(facs), gpd.read_file(roads), gpd.read_file(lgas), outs, pops
     )
 
-    # --- 1. SPATIAL AUTOCORRELATION TABLE ---
-    st.header("1. Summary of Spatial Autocorrelation (Global Moran’s I)")
-    moran_data = {
-        "Variable": ["2024 Outpatient Rate"],
-        "Moran’s Index (I)": [round(mi.I, 4)],
-        "Z-score": [round(mi.z_sim, 4)],
-        "P-value": [round(mi.p_sim, 4)],
-        "Spatial Characterization": ["Spatial Dispersed" if mi.I < 0 else "Spatial Clustered"]
-    }
-    st.table(pd.DataFrame(moran_data))
+    if annual_maps:
+        # 1. SPATIAL AUTOCORRELATION TABLE
+        st.header("1. Summary of Spatial Autocorrelation (Global Moran’s I)")
+        moran_data = {
+            "Variable": ["2024 Outpatient Rate"],
+            "Moran’s Index (I)": [round(mi.I, 4)],
+            "Z-score": [round(mi.z_sim, 4)],
+            "P-value": [round(mi.p_sim, 4)],
+            "Spatial Characterization": ["Spatial Dispersed" if mi.I < 0 else "Spatial Clustered"]
+        }
+        st.table(pd.DataFrame(moran_data))
 
-    # --- 2. TEMPORAL MAPS (By LGA) ---
-    st.header("2. Annual Outpatient Attendance Distribution (2019-2024)")
-    map_cols = st.columns(3)
-    years = sorted(annual_maps.keys())
-    for i, yr in enumerate(years):
-        with map_cols[i % 3]:
-            fig, ax = plt.subplots(figsize=(6, 6))
-            annual_maps[yr].plot(column=f'Rate_{yr}', cmap='RdYlGn_r', legend=True, ax=ax)
-            ax.set_title(f"Year {yr} (Rate per 1000)")
-            ax.set_axis_off()
-            st.pyplot(fig)
+        # 2. TEMPORAL MAPS (By LGA)
+        st.header("2. Annual Outpatient Attendance Distribution (2019-2024)")
+        map_cols = st.columns(3)
+        years = sorted(annual_maps.keys())
+        for i, yr in enumerate(years):
+            with map_cols[i % 3]:
+                fig, ax = plt.subplots(figsize=(6, 6))
+                annual_maps[yr].plot(column=f'Rate_{yr}', cmap='RdYlGn_r', legend=True, ax=ax)
+                ax.set_title(f"Year {yr} (Rate per 1000)")
+                ax.set_axis_off()
+                st.pyplot(fig)
 
-    # --- 3. POPULATION DENSITY MAP ---
-    st.header("3. Population Density by LGA")
-    fig_p, ax_p = plt.subplots(figsize=(8, 5))
-    pop_map.plot(column='Population', cmap='Blues', legend=True, ax=ax_p)
-    ax_p.set_axis_off()
-    st.pyplot(fig_p)
+        # 3. POPULATION DENSITY MAP
+        st.header("3. Population Density by LGA")
+        fig_p, ax_p = plt.subplots(figsize=(8, 5))
+        pop_map.plot(column='Population', cmap='Blues', legend=True, ax=ax_p)
+        ax_p.set_axis_off()
+        st.pyplot(fig_p)
 
-    # --- 4. SEASONAL TREND TABLE ---
-    st.header("4. Outpatient Attendance Rates by Season and LGA")
-    st.dataframe(seasonal_table.style.highlight_max(axis=1, color='lightgreen', subset=['Harmattan', 'Hot-Dry', 'Rainy Season']), use_container_width=True)
+        # 4. SEASONAL TREND TABLE
+        st.header("4. Outpatient Attendance Rates by Season and LGA")
+        st.dataframe(seasonal_table.style.highlight_max(axis=1, color='lightgreen', subset=['Harmattan', 'Hot-Dry', 'Rainy Season']), use_container_width=True)
 
-    # --- 5. INFRASTRUCTURE & DESERT ANALYSIS ---
-    st.header("5. Strategic Infrastructure & Healthcare Deserts")
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        st.subheader("Map of Healthcare Deserts (Uncovered Areas)")
-        fig_d, ax_d = plt.subplots()
-        annual_maps[2024].boundary.plot(ax=ax_d, color='black', linewidth=0.5)
-        deserts.plot(ax=ax_d, color='#e63946', alpha=0.7, label='Desert Area')
-        ax_d.set_axis_off()
-        st.pyplot(fig_d)
-    with c2:
-        st.subheader("Underserved LGAs")
-        desert_lgas = deserts['NAME_2'].unique()
-        st.write(pd.DataFrame(desert_lgas, columns=["LGA Priority List"]))
-        st.info("**Requirement:** New Comprehensive Health Centers should be positioned within these red zones to bridge the 60-min travel gap.")
+        # 5. INFRASTRUCTURE & DESERT ANALYSIS
+        st.header("5. Strategic Infrastructure & Healthcare Deserts")
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.subheader("Map of Healthcare Deserts (Uncovered Areas)")
+            fig_d, ax_d = plt.subplots()
+            annual_maps[max(years)].boundary.plot(ax=ax_d, color='black', linewidth=0.5)
+            deserts.plot(ax=ax_d, color='#e63946', alpha=0.7, label='Desert Area')
+            ax_d.set_axis_off()
+            st.pyplot(fig_d)
+        with c2:
+            st.subheader("Underserved LGAs")
+            desert_lgas = deserts['NAME_2'].unique()
+            st.write(pd.DataFrame(desert_lgas, columns=["LGA Priority List"]))
+            st.info("**Requirement:** New Comprehensive Health Centers should be positioned within these red zones to bridge the 60-min travel gap.")
