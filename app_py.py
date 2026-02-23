@@ -16,85 +16,69 @@ from engine_layer_py import run_analysis
 
 st.set_page_config(layout="wide", page_title="Kaduna Health Decision Support")
 
-# --- VISUAL STYLING ---
 def set_bg(bin_file):
     try:
         with open(bin_file, 'rb') as f:
             data = f.read()
         bin_str = base64.b64encode(data).decode()
-        st.markdown(f'''<style>.stApp {{background-image: url("data:image/png;base64,{bin_str}"); background-size: cover;}} .main {{background-color: rgba(255, 255, 255, 0.98); padding: 30px; border-radius: 15px; border: 1px solid #e0e0e0;}} h1, h2 {{color: #004d40;}}</style>''', unsafe_allow_html=True)
+        st.markdown(f'''<style>.stApp {{background-image: url("data:image/png;base64,{bin_str}"); background-size: cover;}} .main {{background-color: rgba(255, 255, 255, 0.98); padding: 30px; border-radius: 15px;}}</style>''', unsafe_allow_html=True)
     except: pass
 
 set_bg('background.png')
 
 st.title("KADUNA STATE STRATEGIC HEALTH INTELLIGENCE")
-st.subheader("Implementation Portal for Health Sector Decision-Making")
+st.subheader("Decision Support System (DSS) Implementation")
 
-# --- SIDEBAR ---
 with st.sidebar:
-    st.header("Control Panel")
+    st.header("Input Data")
     outs = st.file_uploader("Outpatient Data (Excel)", accept_multiple_files=True)
     facs = st.file_uploader("Facilities (Zip)", type=['zip'])
-    lgas = st.file_uploader("LGA Boundaries (Zip)", type=['zip'])
-    roads = st.file_uploader("Road Network (gpkg)", type=['gpkg'])
-    pops = st.file_uploader("Population Raster (tif)", type=['tif'])
-    run = st.button("GENERATE STRATEGIC REPORT")
+    lgas = st.file_uploader("Boundaries (Zip)", type=['zip'])
+    roads = st.file_uploader("Roads (gpkg)", type=['gpkg'])
+    pops = st.file_uploader("Population (tif)", type=['tif'])
+    run = st.button("GENERATE DECISION MATRIX")
     
     st.markdown("---")
-    with st.expander("References & Documentation"):
-        st.caption("Anselin, L. (1995) 'Local Indicators of Spatial Association'")
+    with st.expander("References"):
+        st.caption("Anselin, L. (1995) 'LISA'")
         st.caption("Kaduna State MOH Strategic Plan")
 
-# --- DASHBOARD IMPLEMENTATION ---
 if run and all([outs, facs, lgas, roads, pops]):
-    with st.spinner("Executing spatial intelligence algorithms..."):
+    with st.spinner("Processing..."):
         res = run_analysis(gpd.read_file(facs), gpd.read_file(roads), gpd.read_file(lgas), outs, pops)
     
     if res[0] is not None:
-        annual_maps, mi, deserts, pop_map = res
+        annual_maps, mi, deserts, pop_map, raw_check = res
         
         # 1. SPATIAL AUTOCORRELATION
-        st.header("1. Evidence-Based Spatial Distribution")
-        m1, m2 = st.columns(2)
-        if not pd.isna(mi.I):
-            m1.metric("Global Moran's I", round(mi.I, 4))
-            m2.success(f"Pattern Detected: {'Spatial Dispersion' if mi.I < 0 else 'Spatial Clustering'}")
-        else:
-            st.warning("Spatial weight matrix indicates zero variance. Check if all LGAs have data.")
+        st.header("1. Spatial Analysis (Global Moran’s I)")
+        col_m1, col_m2 = st.columns(2)
+        col_m1.metric("Moran's I Index", round(mi.I, 4))
+        col_m2.write(f"**Statistical Interpretation:** {'Spatial Dispersed' if mi.I < 0 else 'Spatial Clustered'}")
+        
+        # 2. MAPS
+        st.header("2. Outpatient Intensity & Service Gaps")
+        m_c1, m_c2 = st.columns(2)
+        
+        latest_yr = max(annual_maps.keys())
+        with m_c1:
+            st.write(f"**Attendance Intensity ({latest_yr})**")
+            fig1, ax1 = plt.subplots()
+            annual_maps[latest_yr].plot(column=f'Rate_{latest_yr}', cmap='YlGnBu', legend=True, ax=ax1)
+            ax1.set_axis_off()
+            st.pyplot(fig1)
+            
+        with m_c2:
+            st.write("**Healthcare Deserts (Gaps)**")
+            fig2, ax2 = plt.subplots()
+            annual_maps[latest_yr].boundary.plot(ax=ax2, color='black', linewidth=0.5)
+            deserts.plot(ax=ax2, color='red', alpha=0.7)
+            ax2.set_axis_off()
+            st.pyplot(fig2)
 
-        # 2. ATTENDANCE INTENSITY
-        st.header("2. Outpatient Utilization Intensity (Rate per 1,000)")
-        years = sorted(annual_maps.keys())
-        cols = st.columns(len(years))
-        for i, yr in enumerate(years):
-            with cols[i]:
-                fig, ax = plt.subplots()
-                annual_maps[yr].plot(column=f'Rate_{yr}', cmap='YlGnBu', legend=True, ax=ax)
-                ax.set_title(f"Year {yr} Intensity", fontsize=10)
-                ax.set_axis_off()
-                st.pyplot(fig)
-
-        # 3. POPULATION & DESERTS
-        st.header("3. Strategic Resource Gaps (Healthcare Deserts)")
-        c1, c2 = st.columns(2)
-        with c1:
-            st.write("**Population Pressure Map**")
-            fig_p, ax_p = plt.subplots()
-            pop_map.plot(column='Population', cmap='Purples', legend=True, ax=ax_p)
-            ax_p.set_axis_off()
-            st.pyplot(fig_p)
-        with c2:
-            st.write("**Identified Healthcare Deserts**")
-            fig_d, ax_d = plt.subplots()
-            annual_maps[max(years)].boundary.plot(ax=ax_d, color='black', linewidth=0.5)
-            deserts.plot(ax=ax_d, color='red', alpha=0.7)
-            ax_d.set_axis_off()
-            st.pyplot(fig_d)
-
-        # 4. DECISION TABLE
-        st.header("4. Priority Intervention List")
-        st.info("The following LGAs are classified as 'Under-Served' based on the 30km accessibility threshold. Authorities should prioritize these for PHC construction.")
-        priority_df = pd.DataFrame(deserts['NAME_2'].unique(), columns=["LGA Priority Name"])
-        st.table(priority_df)
+        # 3. DECISION TABLE
+        st.header("3. Intervention Priority List")
+        st.table(pd.DataFrame(deserts['NAME_2'].unique(), columns=["LGA for Priority Intervention"]))
+        
     else:
-        st.error(f"System Error: {res[3]}")
+        st.error(f"Error in data processing: {res[4]}")
