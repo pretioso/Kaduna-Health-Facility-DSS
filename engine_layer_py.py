@@ -14,12 +14,9 @@ import numpy as np
 import re
 from rasterstats import zonal_stats
 import tempfile, os
-import libpysal as lp
-from esda.moran import Moran
 
 def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
     try:
-        # 1. Spatial Alignment & Population
         lga_boundary = lga_boundary.to_crs(epsg=4326)
         with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
             tmp.write(population_tif.read())
@@ -31,7 +28,6 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
         def clean_name(name): return re.sub(r'[^A-Z0-9]', '', str(name).upper())
         lga_boundary["MATCH_KEY"] = lga_boundary["NAME_2"].apply(clean_name)
 
-        # 2. Number 1: Multi-Year Processing (2019-2024)
         all_data = []
         for file in outpatient_files:
             df = pd.read_excel(file)
@@ -53,21 +49,13 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
                 merged[f'Rate_{yr}'] = (merged['Total'] / merged['Population']) * 1000
                 annual_results[yr] = merged
 
-        # Moran's I (2024)
-        latest_yr = 2024 if 2024 in annual_results else max(annual_results.keys())
-        w = lp.weights.Queen.from_dataframe(annual_results[latest_yr])
-        w.transform = 'R'
-        mi = Moran(annual_results[latest_yr][f'Rate_{latest_yr}'], w)
-
-        # 3. Number 2: Accessibility Logic
         fac_metric = facilities_df.to_crs(epsg=32632)
-        iso_30 = fac_metric.buffer(15000).union_all() # 30 min approx
-        iso_60 = fac_metric.buffer(30000).union_all() # 60 min approx
-        
-        iso_gdf_30 = gpd.GeoDataFrame(geometry=[iso_30], crs=32632).to_crs(epsg=4326)
+        iso_60 = fac_metric.buffer(30000).union_all()
+        iso_30 = fac_metric.buffer(15000).union_all()
         iso_gdf_60 = gpd.GeoDataFrame(geometry=[iso_60], crs=32632).to_crs(epsg=4326)
+        iso_gdf_30 = gpd.GeoDataFrame(geometry=[iso_30], crs=32632).to_crs(epsg=4326)
         deserts = gpd.overlay(lga_boundary, iso_gdf_60, how='difference')
         
-        return annual_results, mi, deserts, iso_gdf_30, iso_gdf_60, lga_boundary, roads_df
+        return annual_results, deserts, iso_gdf_30, iso_gdf_60, lga_boundary, roads_df
     except Exception as e:
         return None, None, None, None, None, None, str(e)
