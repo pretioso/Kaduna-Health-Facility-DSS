@@ -19,65 +19,59 @@ from esda.moran import Moran
 
 def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
     try:
-        # 1. Coordinate Alignment
+        # 1. Spatial Prep
         lga_boundary = lga_boundary.to_crs(epsg=4326)
-        
-        # 2. Extract Population
         with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
             tmp.write(population_tif.read())
             tmp_path = tmp.name
         stats = zonal_stats(lga_boundary, tmp_path, stats=["sum"])
-        lga_boundary["Population"] = [max(s["sum"], 1) if s and s["sum"] else 1000 for s in stats]
+        lga_boundary["Population"] = [max(s["sum"], 1) if s and s["sum"] else 5000 for s in stats]
         os.unlink(tmp_path)
         
-        # 3. Aggressive Name Cleaning Function
-        def clean_name(name):
-            return re.sub(r'[^A-Z0-9]', '', str(name).upper())
-
+        # 2. Name Standardization
+        def clean_name(name): return re.sub(r'[^A-Z0-9]', '', str(name).upper())
         lga_boundary["MATCH_KEY"] = lga_boundary["NAME_2"].apply(clean_name)
 
-        # 4. Process Outpatient Data
+        # 3. Multi-Year Processing
         all_data = []
         for file in outpatient_files:
             df = pd.read_excel(file)
             if 'Year' not in df.columns:
                 match = re.search(r'(\d{4})', file.name)
                 df['Year'] = int(match.group(1)) if match else 2024
-            
-            # Remove "KD " prefix and clean names
             df["LGA_CLEAN"] = df["LGA"].astype(str).str.replace(r'^KD\s+', '', regex=True, case=False).apply(clean_name)
             all_data.append(df)
         
         raw_df = pd.concat(all_data, ignore_index=True)
         month_cols = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
         
-        annual_maps = {}
+        annual_results = {}
         for yr in sorted(raw_df['Year'].unique()):
             yr_df = raw_df[raw_df['Year'] == yr].copy()
-            yr_df['Total_Yearly'] = yr_df[month_cols].sum(axis=1)
-            agg = yr_df.groupby('LGA_CLEAN')['Total_Yearly'].sum().reset_index()
-            
-            # Merge and Fill Missing with 0.0001 to avoid Zero Variance in Moran's I
-            merged = lga_boundary.merge(agg, left_on="MATCH_KEY", right_on="LGA_CLEAN", how="left")
-            merged['Total_Yearly'] = merged['Total_Yearly'].fillna(0)
-            merged[f'Rate_{yr}'] = (merged['Total_Yearly'] / merged['Population']) * 1000
-            # Add tiny noise to avoid constant value error in Moran's I
+            yr_df['Total'] = yr_df[month_cols].sum(axis=1)
+            agg = yr_df.groupby('LGA_CLEAN')['Total'].sum().reset_index()
+            merged = lga_boundary.merge(agg, left_on="MATCH_KEY", right_on="LGA_CLEAN", how="left").fillna(0)
+            merged[f'Rate_{yr}'] = (merged['Total'] / merged['Population']) * 1000
+            # Jitter for Moran's I stability
             merged[f'Rate_{yr}'] += np.random.normal(0, 1e-9, len(merged))
-            annual_maps[yr] = merged
+            annual_results[yr] = merged
 
-        # 5. Global Moran's I
-        latest_yr = max(annual_maps.keys())
-        map_final = annual_maps[latest_yr]
-        w = lp.weights.Queen.from_dataframe(map_final)
+        # 4. Moran's I (Latest Year)
+        latest_yr = max(annual_results.keys())
+        w = lp.weights.Queen.from_dataframe(annual_results[latest_yr])
         w.transform = 'R'
-        mi = Moran(map_final[f'Rate_{latest_yr}'], w)
+        mi = Moran(annual_results[latest_yr][f'Rate_{latest_yr}'], w)
 
-        # 6. Healthcare Deserts
+        # 5. Desert Logic (Showing Boundaries)
         fac_metric = facilities_df.to_crs(epsg=32632)
         lga_metric = lga_boundary.to_crs(epsg=32632)
         coverage = fac_metric.buffer(30000).union_all()
-        deserts = gpd.overlay(lga_metric, gpd.GeoDataFrame(geometry=[coverage], crs=32632), how='difference')
+        deserts_geom = gpd.overlay(lga_metric, gpd.GeoDataFrame(geometry=[coverage], crs=32632), how='difference')
         
-        return annual_maps, mi, deserts, lga_boundary, raw_df
+        # Highlight LGAs that have "Desert" patches inside them
+        desert_lga_names = deserts_geom['NAME_2'].unique()
+        desert_boundary_map = lga_boundary[lga_boundary['NAME_2'].isin(desert_lga_names)]
+        
+        return annual_results, mi, desert_boundary_map, lga_boundary
     except Exception as e:
-        return None, None, None, None, str(e)
+        return None, None, None, str(e)
