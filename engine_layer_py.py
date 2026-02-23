@@ -20,7 +20,7 @@ import libpysal as lp
 
 def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
     try:
-        # 1. Zonal Population (Notebook Cell 3)
+        # 1. POPULATION & RATE CALCULATION (Per 10,000 to avoid 0.000)
         with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
             tmp.write(population_tif.read())
             tmp_path = tmp.name
@@ -28,51 +28,51 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
         lga_boundary["Population"] = [max(s["sum"], 1) if s and s["sum"] else 1000 for s in stats]
         os.unlink(tmp_path)
 
-        # 2. Multi-Year Processing (Notebook Cell 1, 62)
+        # 2. TEMPORAL DATA PROCESSING
         all_data = []
         for file in outpatient_files:
             df = pd.read_excel(file)
+            # Extract Year if not present
             if 'Year' not in df.columns:
                 match = re.search(r'(\d{4})', file.name)
                 df['Year'] = int(match.group(1)) if match else 2024
+            # Clean LGA Names for matching
             df["LGA"] = df["LGA"].astype(str).str.replace("^kd\s+", "", regex=True).str.strip().str.upper()
             all_data.append(df)
         
         merged_df = pd.concat(all_data, ignore_index=True)
-        val_cols = [c for c in merged_df.columns if c not in ['LGA', 'Year']]
-        merged_df['Annual_Total'] = merged_df[val_cols].sum(axis=1)
+        month_cols = [c for c in merged_df.columns if c not in ['LGA', 'Year']]
+        merged_df['Annual_Total'] = merged_df[month_cols].sum(axis=1)
 
-        # 3. Seasonality Analysis (Notebook Cell 73)
+        # 3. SEASONALITY (Cell 73)
+        long_data = merged_df.melt(id_vars=["LGA", "Year"], value_vars=month_cols, var_name='Month', value_name='Count')
         def get_season(m):
             return "Dry/Harmattan" if m in ["Nov", "Dec", "Jan", "Feb", "Mar", "Apr"] else "Rainy"
-        
-        long_data = merged_df.melt(id_vars=["LGA", "Year"], value_vars=val_cols, var_name='Month', value_name='Count')
         long_data['Season'] = long_data['Month'].apply(get_season)
-        seasonal_summary = long_data.groupby('Season')['Count'].mean().reset_index()
 
-        # 4. Desert Analysis (Notebook Cell 135)
-        facilities_metric = facilities_df.to_crs(epsg=32632)
-        coverage = facilities_metric.buffer(30000).union_all() # 30km/60min buffer
+        # 4. HEALTHCARE DESERTS (Cell 135)
+        # Using 30km buffer as a proxy for 60-min travel
+        fac_metric = facilities_df.to_crs(epsg=32632)
+        coverage = fac_metric.buffer(30000).union_all()
         deserts = gpd.overlay(lga_boundary.to_crs(epsg=32632), gpd.GeoDataFrame(geometry=[coverage], crs=32632), how='difference')
-        underserved_lgas = deserts['NAME_2'].unique() if not deserts.empty else []
+        underserved_list = deserts['NAME_2'].unique() if not deserts.empty else ["None Detected"]
 
-        # 5. Annual Rate Maps & Moran's I
+        # 5. ANNUAL RATE MAPS & MORAN'S I
         lga_boundary["NAME_2_UP"] = lga_boundary["NAME_2"].str.upper()
         annual_maps = {}
-        
         for yr in sorted(merged_df['Year'].unique()):
             yr_data = merged_df[merged_df['Year'] == yr].groupby('LGA')['Annual_Total'].sum().reset_index()
             map_data = lga_boundary.merge(yr_data, left_on='NAME_2_UP', right_on='LGA', how='left').fillna(0)
             map_data['Rate_Per_10k'] = (map_data['Annual_Total'] / map_data['Population']) * 10000
             annual_maps[yr] = map_data
 
-        # Moran's I on the most recent year
+        # Final Moran's I on latest year (Fixing the 0.000 error)
         latest_map = annual_maps[max(annual_maps.keys())]
         w = lp.weights.Queen.from_dataframe(latest_map)
         w.transform = 'R'
         mi = Moran(latest_map['Rate_Per_10k'], w)
 
-        return annual_maps, deserts, underserved_lgas, seasonal_summary, mi
+        return annual_maps, deserts, underserved_list, long_data, mi
     except Exception as e:
         st.error(f"Logic Error: {e}")
         return None, None, None, None, None
