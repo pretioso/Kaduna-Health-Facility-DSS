@@ -10,71 +10,75 @@ Original file is located at
 import streamlit as st
 import geopandas as gpd
 import pandas as pd
-import numpy as np
-from rasterstats import zonal_stats
-import tempfile, os
-import libpysal as lp
-from esda.moran import Moran
+import matplotlib.pyplot as plt
+import seaborn as sns
+from engine_layer_py import run_analysis
 
-def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
-    try:
-        # --- 1. POPULATION & NAME CLEANING (Cell 3, 37, 12) ---
-        with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
-            tmp.write(population_tif.read())
-            tmp_path = tmp.name
-        stats = zonal_stats(lga_boundary, tmp_path, stats=["sum"])
-        lga_boundary["Population"] = [s["sum"] if s and s["sum"] else 1 for s in stats]
-        os.unlink(tmp_path)
-        
-        lga_boundary["NAME_2_UP"] = lga_boundary["NAME_2"].str.strip().str.upper()
+st.set_page_config(layout="wide", page_title="Kaduna Health Research Report")
 
-        # --- 2. DATA MERGING & RATE PER 1000 (Cell 46) ---
-        all_data = []
-        for file in outpatient_files:
-            df = pd.read_excel(file)
-            # Replicate Cell 12 Cleaning
-            df["LGA"] = df["LGA"].astype(str).str.replace("^kd\s+", "", regex=True).str.strip().str.upper()
-            all_data.append(df)
-        
-        raw_df = pd.concat(all_data, ignore_index=True)
-        month_cols = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
-        
-        # Calculate Annual Rates per Year for Maps
-        annual_maps = {}
-        for yr in sorted(raw_df['Year'].unique()):
-            yr_df = raw_df[raw_df['Year'] == yr].copy()
-            yr_df['Annual_Sum'] = yr_df[month_cols].sum(axis=1)
-            agg = yr_df.groupby('LGA')['Annual_Sum'].sum().reset_index()
-            merged = lga_boundary.merge(agg, left_on="NAME_2_UP", right_on="LGA", how="left").fillna(0)
-            merged[f'Rate_{yr}'] = (merged['Annual_Sum'] / merged['Population']) * 1000
-            annual_maps[yr] = merged
+# --- UI STYLING ---
+st.markdown("""<style> .main { background-color: #f8f9fa; } .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; border: 1px solid #dee2e6; } </style>""", unsafe_allow_html=True)
 
-        # --- 3. SEASONAL ANALYSIS (Cell 73) ---
-        long_df = raw_df.melt(id_vars=["LGA", "Year"], value_vars=month_cols, var_name='Month', value_name='Count')
-        long_df = long_df.merge(lga_boundary[['NAME_2_UP', 'Population']], left_on='LGA', right_on='NAME_2_UP')
-        long_df['Rate'] = (long_df['Count'] / long_df['Population']) * 1000
-        
-        def get_season(m):
-            if m in ["November", "December", "January", "February"]: return "Harmattan"
-            if m in ["March", "April"]: return "Hot-Dry"
-            return "Rainy Season"
-        
-        long_df['Season'] = long_df['Month'].apply(get_season)
-        seasonal_table = long_df.groupby(['LGA', 'Season'])['Rate'].mean().unstack().reset_index()
-        seasonal_table['Seasonal Peak'] = seasonal_table[['Harmattan', 'Hot-Dry', 'Rainy Season']].idxmax(axis=1)
+with st.sidebar:
+    st.title("Project Data Portal")
+    outs = st.file_uploader("Outpatient Data", accept_multiple_files=True)
+    facs = st.file_uploader("Facilities (Zip)", type=['zip'])
+    lgas = st.file_uploader("Boundaries (Zip)", type=['zip'])
+    roads = st.file_uploader("Roads (gpkg)", type=['gpkg'])
+    pops = st.file_uploader("Population (tif)", type=['tif'])
+    run = st.button("Generate Research Report")
 
-        # --- 4. MORAN'S I (Cell 61 - Replicating your -0.2554) ---
-        latest_map = annual_maps[2024]
-        w = lp.weights.Queen.from_dataframe(latest_map)
-        w.transform = 'R'
-        mi = Moran(latest_map['Rate_2024'], w)
+if run and all([outs, facs, lgas, roads, pops]):
+    annual_maps, seasonal_table, mi, deserts, pop_map = run_analysis(
+        gpd.read_file(facs), gpd.read_file(roads), gpd.read_file(lgas), outs, pops
+    )
 
-        # --- 5. DESERTS & INFRASTRUCTURE ---
-        roads_metric = roads_df.to_crs(epsg=32632)
-        facilities_metric = facilities_df.to_crs(epsg=32632)
-        coverage = facilities_metric.buffer(30000).union_all() # 30km/60min
-        deserts = gpd.overlay(lga_boundary.to_crs(epsg=32632), gpd.GeoDataFrame(geometry=[coverage], crs=32632), how='difference')
-        
-        return annual_maps, seasonal_table, mi, deserts, lga_boundary
-    except Exception as e:
-        return None, None, None, None, str(e)
+    # --- 1. SPATIAL AUTOCORRELATION TABLE ---
+    st.header("1. Summary of Spatial Autocorrelation (Global Moran’s I)")
+    moran_data = {
+        "Variable": ["2024 Outpatient Rate"],
+        "Moran’s Index (I)": [round(mi.I, 4)],
+        "Z-score": [round(mi.z_sim, 4)],
+        "P-value": [round(mi.p_sim, 4)],
+        "Spatial Characterization": ["Spatial Dispersed" if mi.I < 0 else "Spatial Clustered"]
+    }
+    st.table(pd.DataFrame(moran_data))
+
+    # --- 2. TEMPORAL MAPS (By LGA) ---
+    st.header("2. Annual Outpatient Attendance Distribution (2019-2024)")
+    map_cols = st.columns(3)
+    years = sorted(annual_maps.keys())
+    for i, yr in enumerate(years):
+        with map_cols[i % 3]:
+            fig, ax = plt.subplots(figsize=(6, 6))
+            annual_maps[yr].plot(column=f'Rate_{yr}', cmap='RdYlGn_r', legend=True, ax=ax)
+            ax.set_title(f"Year {yr} (Rate per 1000)")
+            ax.set_axis_off()
+            st.pyplot(fig)
+
+    # --- 3. POPULATION DENSITY MAP ---
+    st.header("3. Population Density by LGA")
+    fig_p, ax_p = plt.subplots(figsize=(8, 5))
+    pop_map.plot(column='Population', cmap='Blues', legend=True, ax=ax_p)
+    ax_p.set_axis_off()
+    st.pyplot(fig_p)
+
+    # --- 4. SEASONAL TREND TABLE ---
+    st.header("4. Outpatient Attendance Rates by Season and LGA")
+    st.dataframe(seasonal_table.style.highlight_max(axis=1, color='lightgreen', subset=['Harmattan', 'Hot-Dry', 'Rainy Season']), use_container_width=True)
+
+    # --- 5. INFRASTRUCTURE & DESERT ANALYSIS ---
+    st.header("5. Strategic Infrastructure & Healthcare Deserts")
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        st.subheader("Map of Healthcare Deserts (Uncovered Areas)")
+        fig_d, ax_d = plt.subplots()
+        annual_maps[2024].boundary.plot(ax=ax_d, color='black', linewidth=0.5)
+        deserts.plot(ax=ax_d, color='#e63946', alpha=0.7, label='Desert Area')
+        ax_d.set_axis_off()
+        st.pyplot(fig_d)
+    with c2:
+        st.subheader("Underserved LGAs")
+        desert_lgas = deserts['NAME_2'].unique()
+        st.write(pd.DataFrame(desert_lgas, columns=["LGA Priority List"]))
+        st.info("**Requirement:** New Comprehensive Health Centers should be positioned within these red zones to bridge the 60-min travel gap.")
