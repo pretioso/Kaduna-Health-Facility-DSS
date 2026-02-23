@@ -11,14 +11,18 @@ import streamlit as st
 import geopandas as gpd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import pandas as pd
 from engine_layer_py import run_analysis
 
-st.set_page_config(layout="wide")
-st.title("KADUNA STATE STRATEGIC HEALTH INTELLIGENCE")
+st.set_page_config(layout="wide", page_title="Kaduna Health Intelligence")
 
-# --- SIDEBAR ---
+# 1. Dashboard Title & Context
+st.title("🏥 KADUNA STATE STRATEGIC HEALTH INTELLIGENCE")
+st.markdown("---")
+
+# 2. Sidebar Uploads
 with st.sidebar:
-    st.header("Upload Repository")
+    st.header("Strategic Inputs")
     outs = st.file_uploader("Outpatient Data", accept_multiple_files=True)
     facs = st.file_uploader("Facilities (Zip)", type=['zip'])
     lgas = st.file_uploader("Boundaries (Zip)", type=['zip'])
@@ -27,46 +31,49 @@ with st.sidebar:
     process = st.button("Generate Stakeholder Report")
 
 if process and all([outs, facs, lgas, roads, pops]):
-    annual_maps, deserts, underserved_lgas, seasonal_summary, mi = run_analysis(
+    annual_maps, deserts, underserved, long_data, mi = run_analysis(
         gpd.read_file(facs), gpd.read_file(roads), gpd.read_file(lgas), outs, pops
     )
 
     if annual_maps:
-        # SECTION 1: TEMPORAL DISTRIBUTION (By LGA)
-        st.header("I. Temporal Outpatient Distribution (Annual per 10k Population)")
-        cols = st.columns(len(annual_maps))
-        for i, (yr, data) in enumerate(annual_maps.items()):
+        # --- TAB 1: TEMPORAL DISTRIBUTION ---
+        st.header("I. Annual Outpatient Distribution (Rate per 10k)")
+        years = list(annual_maps.keys())
+        cols = st.columns(len(years))
+        for i, yr in enumerate(years):
             with cols[i]:
-                st.subheader(f"Year: {yr}")
+                st.subheader(f"Year {yr}")
                 fig, ax = plt.subplots()
-                data.plot(column='Rate_Per_10k', cmap='YlOrRd', legend=True, ax=ax)
+                annual_maps[yr].plot(column='Rate_Per_10k', cmap='YlOrRd', legend=True, ax=ax)
                 ax.set_axis_off()
                 st.pyplot(fig)
 
-        # SECTION 2: DESERTS & UNDERSERVED
+        # --- TAB 2: HEALTHCARE DESERTS ---
         st.header("II. Healthcare Deserts & Underserved LGAs")
         c1, c2 = st.columns([2, 1])
         with c1:
+            st.write("Red areas indicate locations >60 minutes from a facility.")
             fig_d, ax_d = plt.subplots()
-            annual_maps[max(annual_maps.keys())].boundary.plot(ax=ax_d, color='black', linewidth=0.5)
-            deserts.plot(ax=ax_d, color='red', alpha=0.7)
+            annual_maps[max(years)].boundary.plot(ax=ax_d, color='black', linewidth=0.5)
+            deserts.to_crs(annual_maps[max(years)].crs).plot(ax=ax_d, color='red', alpha=0.7)
             st.pyplot(fig_d)
         with c2:
-            st.write("**Underserved LGAs (Critical Gaps):**")
-            st.dataframe(pd.DataFrame(underserved_lgas, columns=["LGA Name"]), use_container_width=True)
+            st.info("**Priority List: Underserved LGAs**")
+            st.table(pd.DataFrame(underserved, columns=["LGA Name"]))
 
-        # SECTION 3: SEASONALITY
-        st.header("III. Seasonal Surge Analysis")
-        fig_s, ax_s = plt.subplots(figsize=(8, 3))
-        sns.barplot(data=seasonal_summary, x='Season', y='Count', palette='viridis', ax=ax_s)
+        # --- TAB 3: SEASONALITY ---
+        st.header("III. Seasonal Demand Analysis")
+        fig_s, ax_s = plt.subplots(figsize=(10, 4))
+        sns.boxplot(data=long_data, x='Season', y='Count', palette='Set2', ax=ax_s)
         st.pyplot(fig_s)
 
-        # SECTION 4: MORAN'S I (Clarity Fix)
-        st.header("IV. Spatial Inequality Report (Moran's I)")
-        m_col1, m_col2 = st.columns(2)
-        m_col1.metric("Moran's I Index", round(mi.I, 4))
-        m_col1.metric("P-Value", round(mi.p_sim, 4))
+        # --- TAB 4: MORAN'S I ---
+        st.header("IV. Spatial Inequality (Moran's I)")
+        m1, m2 = st.columns(2)
+        m1.metric("Moran's I Index", round(mi.I, 4))
+        m1.metric("P-Value", round(mi.p_sim, 4))
         
-        implication = "Clustered (Inequitable)" if mi.I > 0 and mi.p_sim < 0.05 else "Random"
-        m_col2.success(f"**Conclusion:** {implication}")
-        m_col2.write("**Stakeholder Implication:** Significant clustering means healthcare access is determined by location, not need. Targeted investment is required in the Red zones.")
+        with m2:
+            conclusion = "Clustered (Inequitable)" if mi.I > 0 and mi.p_sim < 0.05 else "Random"
+            st.subheader(f"Status: {conclusion}")
+            st.write("**Stakeholder Implication:** Significant clustering means healthcare access is location-dependent. Policies must target 'Cold Spot' LGAs to reduce the state-wide inequality gap.")
