@@ -2,10 +2,10 @@ streamlit
 geopandas
 pandas
 matplotlib
-seaborn
 rasterstats
 libpysal
 esda
-openpyxl
 pyogrio
+fiona
+openpyxl
 rtree
