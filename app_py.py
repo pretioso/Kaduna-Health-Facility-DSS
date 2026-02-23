@@ -11,36 +11,32 @@ import streamlit as st
 import geopandas as gpd
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import base64
 from engine_layer_py import run_analysis
 
 st.set_page_config(layout="wide", page_title="Kaduna Strategic Health Intel")
 
-# --- CUSTOM CSS FOR THE IMAGE-GENERATED LOOK ---
-def set_interface_style(bg_file, is_homepage=True):
-    try:
-        with open(bg_file, 'rb') as f:
-            data = f.read()
-        bin_str = base64.b64encode(data).decode()
-        
-        if is_homepage:
-            # Full screen background for homepage
+def set_style(is_homepage=True):
+    if is_homepage:
+        try:
+            with open('background.png', 'rb') as f:
+                data = f.read()
+            bin_str = base64.b64encode(data).decode()
             style = f'''<style>.stApp {{background-image: url("data:image/png;base64,{bin_str}"); background-size: cover;}}
-            .main {{background: rgba(0,0,0,0.5); color: white; border-radius: 20px; padding: 50px; text-align: center;}}</style>'''
-        else:
-            # Clean dashboard look with sidebar and white panels
-            style = f'''<style>.stApp {{background: #f4f7f6;}}
-            [data-testid="stSidebar"] {{background-color: #1e293b !important; color: white;}}
-            .main {{background: white; border-radius: 10px; padding: 20px; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);}}
-            h1, h2 {{color: #1e293b; font-weight: 700;}}</style>'''
-        st.markdown(style, unsafe_allow_html=True)
-    except: pass
+            .main {{background: rgba(0,0,0,0.6); color: white; border-radius: 20px; padding: 50px; text-align: center;}}</style>'''
+        except: style = ""
+    else:
+        # WHITE BACKGROUND for dashboard
+        style = '''<style>.stApp {background-color: white;}
+        [data-testid="stSidebar"] {background-color: #1e293b !important; color: white;}
+        .main {background: white; color: black; padding: 20px;}
+        h1, h2, h3 {color: #1e293b !important;}</style>'''
+    st.markdown(style, unsafe_allow_html=True)
 
-# Initialize State
 if 'analyzed' not in st.session_state:
     st.session_state.analyzed = False
 
-# --- SIDEBAR (Always Visible) ---
 with st.sidebar:
     st.title("📁 Input Data")
     outs = st.file_uploader("Outpatient Data (Excel)", accept_multiple_files=True)
@@ -48,65 +44,74 @@ with st.sidebar:
     lgas = st.file_uploader("Boundaries (Zip)", type=['zip'])
     roads = st.file_uploader("Roads (gpkg)", type=['gpkg'])
     pops = st.file_uploader("Population (tif)", type=['tif'])
-    if st.button("🚀 GENERATE DASHBOARD", use_container_width=True):
+    if st.button("🚀 GENERATE DECISION MATRIX", use_container_width=True):
         if all([outs, facs, lgas, roads, pops]):
             st.session_state.analyzed = True
-        else:
-            st.error("Please upload all files first.")
 
-# --- HOMEPAGE LOGIC ---
 if not st.session_state.analyzed:
-    set_interface_style('background.png', is_homepage=True)
+    set_style(is_homepage=True)
     st.title("KADUNA STATE STRATEGIC DECISION HEALTH INTELLIGENCE")
     st.markdown("### Implementation Portal for Health Sector Decision-Making")
-    st.info("Please upload your spatial and health datasets in the sidebar to begin the analysis.")
-    
-# --- DASHBOARD LOGIC ---
 else:
-    set_interface_style('background.png', is_homepage=False)
-    st.title("Strategic Analysis Output")
+    set_style(is_homepage=False)
+    st.title("Strategic Analysis Dashboard")
     
     res = run_analysis(gpd.read_file(facs), gpd.read_file(roads), gpd.read_file(lgas), outs, pops)
     
     if res[0] is not None:
-        annual_results, mi, desert_map, full_map = res
+        annual_results, mi, deserts, iso30, iso60, lga_b = res
         
-        # 1. Multi-Year Maps (2019 - 2024)
-        st.header("Temporal Utilization Intensity (2019-2024)")
+        # 1. Multi-Year Intensity (2019-2024)
+        st.header("1. Annual Outpatient Attendance Intensity")
         years = sorted(annual_results.keys())
         cols = st.columns(3)
         for i, yr in enumerate(years):
             with cols[i % 3]:
-                fig, ax = plt.subplots(figsize=(5, 5))
-                annual_results[yr].plot(column=f'Rate_{yr}', cmap='YlGnBu', legend=True, ax=ax)
-                ax.set_title(f"LGA Outpatient Rate: {yr}", fontsize=12, fontweight='bold')
+                fig, ax = plt.subplots(figsize=(6, 6))
+                # Maps with black borders
+                annual_results[yr].plot(column=f'Rate_{yr}', cmap='YlGnBu', edgecolor='black', linewidth=0.4, legend=True, ax=ax)
+                ax.set_title(f"Year {yr} Intensity", fontsize=12, fontweight='bold')
                 ax.set_axis_off()
                 st.pyplot(fig)
-                st.caption(f"Spatial distribution of health utilization in {yr}.")
 
         st.divider()
 
-        # 2. Moran's I & Deserts
-        st.header("Spatial Autocorrelation & Resource Gaps")
-        c1, c2 = st.columns([1, 2])
+        # 2. Your Specific Healthcare Desert Plot
+        st.header("2. Facility Accessibility & Healthcare Deserts")
         
-        with c1:
-            st.metric("Global Moran's I", round(mi.I, 4))
-            st.write("**Interpretation:**")
-            st.success("Spatial Dispersion Detected" if mi.I < 0 else "Spatial Clustering Detected")
-            st.markdown("---")
-            st.subheader("Priority LGAs")
-            st.table(pd.DataFrame(desert_map['NAME_2'].unique(), columns=["LGA Priority Name"]))
+        Facilities_4326 = gpd.read_file(facs).to_crs(epsg=4326)
+        fig_gap, ax_gap = plt.subplots(figsize=(12, 12))
 
-        with c2:
-            st.write("**Healthcare Desert Boundaries (Target Areas)**")
-            fig_d, ax_d = plt.subplots(figsize=(8, 6))
-            full_map.boundary.plot(ax=ax_d, color='#CCCCCC', linewidth=0.5)
-            # Highlight only the borders of the LGAs with deserts
-            desert_map.plot(ax=ax_d, color='#e63946', alpha=0.5, edgecolor='darkred')
-            ax_d.set_title("Zones Requiring Infrastructure Intervention", fontsize=12)
-            ax_d.set_axis_off()
-            st.pyplot(fig_d)
-            
+        # LGA Layer
+        lga_b.plot(ax=ax_gap, color='white', edgecolor='#666666', linewidth=0.8, zorder=1)
+        # Healthcare Deserts
+        deserts.plot(ax=ax_gap, color='#ffcccc', zorder=2)
+        # Isochrones
+        iso60.plot(ax=ax_gap, color='#2ca02c', alpha=0.3, zorder=3)
+        iso30.plot(ax=ax_gap, color='#1f77b4', alpha=0.5, zorder=4)
+        # Point Data
+        Facilities_4326.plot(ax=ax_gap, color='red', markersize=12, marker='+', zorder=5)
+
+        ax_gap.set_title('Public Health Facility Accessibility and Deserts in Kaduna State', fontsize=16, fontweight='bold')
+        ax_gap.set_axis_off()
+
+        # Legend definition
+        legend_elements = [
+            Line2D([0], [0], color='#666666', lw=1, label='LGA Boundary'),
+            Line2D([0], [0], marker='s', color='w', label='Healthcare Desert (>60 min)', markerfacecolor='#ffcccc', markersize=15),
+            Line2D([0], [0], marker='s', color='w', label='60-min Service Area', markerfacecolor='#2ca02c', alpha=0.3, markersize=15),
+            Line2D([0], [0], marker='s', color='w', label='30-min Service Area', markerfacecolor='#1f77b4', alpha=0.5, markersize=15),
+            Line2D([0], [0], marker='+', color='red', label='Health Facility', markersize=10, ls='')
+        ]
+        ax_gap.legend(handles=legend_elements, loc='lower right', title="Accessibility Metrics")
+        st.pyplot(fig_gap)
+        
+        # Moran's I Summary
+        st.subheader("Statistical Summary")
+        st.write(f"**Global Moran's I:** {round(mi.I, 4)} | **Pattern:** {'Dispersed' if mi.I < 0 else 'Clustered'}")
+        
+        # References
+        st.divider()
+        st.caption("References: [1] Anselin, L. (1995) 'LISA'. [2] Kaduna State MOH Plan 2021-2030.")
     else:
-        st.error(f"Analysis Error: {res[3]}")
+        st.error(f"Error: {res[5]}")
