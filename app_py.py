@@ -30,7 +30,6 @@ def set_style(is_homepage=True):
             .main {{background: rgba(0,0,0,0.6); color: white; border-radius: 20px; padding: 50px; text-align: center;}}</style>'''
         except: style = ""
     else:
-        # WHITE BACKGROUND for dashboard + FORCED BLACK TEXT for readability
         style = '''<style>
         .stApp {background-color: white;}
         [data-testid="stSidebar"] {background-color: #1e293b !important; color: white;}
@@ -42,9 +41,8 @@ def set_style(is_homepage=True):
         </style>'''
     st.markdown(style, unsafe_allow_html=True)
 
-# --- 2. FILE HANDLING HELPER ---
+# --- 2. ROBUST FILE HANDLING ---
 def safe_read(uploaded_file):
-    """Prevents AttributeError by checking file presence and creating temp paths."""
     if uploaded_file is None:
         return None
     
@@ -54,21 +52,28 @@ def safe_read(uploaded_file):
         tmp_path = tmp.name
     
     try:
-        # Handle zip files for shapefiles
+        # Using fiona engine for better ZIP stability on Streamlit Cloud
         if uploaded_file.name.endswith('.zip'):
-            df = gpd.read_file(f"zip://{tmp_path}")
+            df = gpd.read_file(f"zip://{tmp_path}", engine='fiona')
         else:
             df = gpd.read_file(tmp_path)
+            
+        if df is None or df.empty:
+            st.error(f"Error: {uploaded_file.name} is empty or unreadable.")
+            return None
         return df
+    except Exception as e:
+        st.error(f"Failed to read {uploaded_file.name}: {str(e)}")
+        return None
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
-# --- 3. STATE MANAGEMENT ---
+# --- 3. SESSION STATE ---
 if 'analyzed' not in st.session_state:
     st.session_state.analyzed = False
 
-# --- 4. SIDEBAR INPUTS ---
+# --- 4. SIDEBAR ---
 with st.sidebar:
     st.title("📁 Input Data")
     outs = st.file_uploader("Outpatient Data (Excel Files)", accept_multiple_files=True)
@@ -81,9 +86,9 @@ with st.sidebar:
         if all([outs, facs, lgas, roads, pops]):
             st.session_state.analyzed = True
         else:
-            st.error("Missing Files: Please upload all 5 data categories.")
+            st.error("Please upload all required files.")
 
-# --- 5. PAGE ROUTING ---
+# --- 5. MAIN LOGIC ---
 if not st.session_state.analyzed:
     set_style(is_homepage=True)
     st.title("KADUNA STATE STRATEGIC DECISION HEALTH INTELLIGENCE")
@@ -92,90 +97,76 @@ else:
     set_style(is_homepage=False)
     st.title("Strategic Analysis Dashboard")
     
-    # Execution Block
-    with st.spinner("Analyzing Spatial Intensity & Accessibility..."):
-        try:
-            # Safe Load
-            f_gdf = safe_read(facs)
-            r_gdf = safe_read(roads)
-            l_gdf = safe_read(lgas)
-            
-            # Run Engine
+    with st.spinner("Processing Data..."):
+        # Load files and validate they aren't 'None'
+        f_gdf = safe_read(facs)
+        r_gdf = safe_read(roads)
+        l_gdf = safe_read(lgas)
+        
+        if f_gdf is not None and r_gdf is not None and l_gdf is not None:
             res = run_analysis(f_gdf, r_gdf, l_gdf, outs, pops)
             
             if res[0] is not None:
                 annual_results, mi, deserts, iso30, iso60, lga_b, road_net = res
                 
-                # --- SECTION 1: ATTENDANCE INTENSITY (UNCHANGED) ---
+                # SECTION 1: INTENSITY
                 st.header("1. Annual Outpatient Attendance Intensity")
                 years = sorted(annual_results.keys())
                 cols = st.columns(3)
                 for i, yr in enumerate(years):
                     with cols[i % 3]:
-                        fig1, ax1 = plt.subplots(figsize=(6, 6))
+                        fig, ax = plt.subplots(figsize=(6, 6))
                         annual_results[yr].plot(column=f'Rate_{yr}', cmap='YlGnBu', 
                                               edgecolor='black', linewidth=0.4, 
-                                              legend=True, ax=ax1)
-                        ax1.set_title(f"Year {yr} Intensity", fontsize=12, fontweight='bold')
-                        ax1.set_axis_off()
-                        st.pyplot(fig1)
+                                              legend=True, ax=ax)
+                        ax.set_title(f"Year {yr} Intensity", fontsize=12, fontweight='bold')
+                        ax.set_axis_off()
+                        st.pyplot(fig)
                 
-                # Moran's I Summary
-                st.subheader("Spatial Autocorrelation Summary")
-                st.info(f"**Global Moran's I (Latest Year):** {round(mi.I, 4)} | **Pattern:** {'Clustered' if mi.I > 0 else 'Dispersed'}")
+                st.info(f"**Global Moran's I (2024):** {round(mi.I, 4)} | **Pattern:** {'Clustered' if mi.I > 0 else 'Dispersed'}")
                 st.divider()
 
-                # --- SECTION 2: ACCESSIBILITY & DESERTS ---
+                # SECTION 2: ACCESSIBILITY
                 st.header("2. Facility Accessibility & Healthcare Deserts")
                 fig_gap, ax_gap = plt.subplots(figsize=(12, 12))
                 lga_b.plot(ax=ax_gap, color='white', edgecolor='black', linewidth=1, zorder=1)
-                deserts.plot(ax=ax_gap, color='#ffcccc', zorder=2) # Red/Pink for deserts
+                deserts.plot(ax=ax_gap, color='#ffcccc', zorder=2)
                 iso60.plot(ax=ax_gap, color='#2ca02c', alpha=0.3, zorder=3)
                 iso30.plot(ax=ax_gap, color='#1f77b4', alpha=0.5, zorder=4)
                 road_net.to_crs(epsg=4326).plot(ax=ax_gap, color='black', linewidth=0.5, alpha=0.6, zorder=5)
                 f_gdf.to_crs(epsg=4326).plot(ax=ax_gap, color='red', markersize=25, marker='+', zorder=6)
-
+                
                 legend_elements = [
-                    Line2D([0], [0], color='black', lw=1, label='Road Network / LGA Boundary'),
-                    Line2D([0], [0], marker='s', color='w', label='Healthcare Desert (>60 min)', markerfacecolor='#ffcccc', markersize=15),
+                    Line2D([0], [0], color='black', lw=1, label='Boundaries/Roads'),
+                    Line2D([0], [0], marker='s', color='w', label='Desert (>60 min)', markerfacecolor='#ffcccc', markersize=15),
                     Line2D([0], [0], marker='s', color='w', label='60-min Service Area', markerfacecolor='#2ca02c', alpha=0.3, markersize=15),
-                    Line2D([0], [0], marker='s', color='w', label='30-min Service Area', markerfacecolor='#1f77b4', alpha=0.5, markersize=15),
                     Line2D([0], [0], marker='+', color='red', label='Health Facility', markersize=10, ls='')
                 ]
-                ax_gap.legend(handles=legend_elements, loc='lower right', title="Accessibility Metrics")
+                ax_gap.legend(handles=legend_elements, loc='lower right')
                 ax_gap.set_axis_off()
                 st.pyplot(fig_gap)
                 st.divider()
 
-                # --- SECTION 3: LONGITUDINAL TABLE (NOW VISIBLE) ---
+                # SECTION 3: TABLE
                 st.header("3. Longitudinal Outpatient Attendance Rates by LGA")
                 table_df = pd.DataFrame({
                     "LGA": ["Birnin Gwari", "Chikun", "Giwa", "Igabi", "Ikara", "Jaba", "Jema'a", "Kachia", "Kaduna North", "Kaduna South", "Kagarko", "Kajuru", "Kaura", "Kauru", "Kubau", "Kudan", "Lere", "Makarfi", "Sabon Gari", "Sanga", "Soba", "Zangon Kataf", "Zaria"],
                     "2019 Rate": [27.80, 13.07, 41.30, 5.32, 28.87, 30.53, 22.25, 11.07, 21.07, 42.42, 19.67, 18.36, 14.34, 17.10, 21.91, 22.10, 21.63, 48.34, 18.06, 36.26, 28.42, 9.06, 27.68],
-                    "2020-21 Average": [33.44, 11.98, 54.36, 5.52, 39.44, 39.55, 24.37, 11.48, 18.77, 41.12, 24.32, 28.52, 15.22, 20.95, 28.91, 24.81, 30.09, 54.17, 22.78, 39.20, 24.91, 11.63, 33.41],
                     "2022-24 Average": [42.74, 13.32, 73.53, 6.54, 42.78, 49.52, 32.82, 18.81, 69.88, 48.07, 25.17, 86.19, 15.66, 23.10, 40.12, 29.04, 50.37, 57.96, 37.52, 36.73, 35.71, 12.04, 45.44],
                     "Trajectory": ["Consistent Growth", "V-Shaped Recovery", "Consistent Growth", "Marginal Increase", "Consistent Growth", "Consistent Growth", "Consistent Growth", "Post-COVID Surge", "Strong Recovery", "V-Shaped Recovery", "Consistent Growth", "Exceptional Surge", "Stable", "Consistent Growth", "Consistent Growth", "Consistent Growth", "Consistent Growth", "High Baseline/Stable", "Consistent Growth", "COVID-Peak/Decline", "V-Shaped Recovery", "Consistent Growth", "Consistent Growth"]
                 })
                 st.table(table_df)
                 st.divider()
 
-                # --- SECTION 4: PRIORITY ROADMAP (NOW VISIBLE) ---
+                # SECTION 4: ROADMAP
                 st.header("4. Infrastructure & Intervention Priority Roadmap")
                 st.markdown("""
-                ### **Priority 1: Infrastructure Expansion (Exceptional Surge)**
-                * **Kajuru & Kaduna North**: These LGAs show the highest post-COVID outpatient surges. Expansion of existing General Hospitals or new PHC construction is critical.
-                
-                ### **Priority 2: Primary Care Deserts (Gap Closure)**
-                * **Birnin Gwari & Kachia**: Targeted placement of new facilities within the red-shaded desert zones to bring travel time under 60 minutes.
-                
-                ### **Priority 3: Service Scaling (Steady Growth)**
-                * **Giwa, Lere, and Ikara**: Continued investment in medical supplies and personnel to match the steady 6-year growth trajectory.
+                * **Kajuru & Kaduna North**: Exceptional demand growth - require facility expansion.
+                * **Birnin Gwari & Kachia**: Focus construction within the identified Healthcare Deserts.
+                * **Giwa & Lere**: Scale staffing to match consistent outpatient growth.
                 """)
-
-                st.caption("References: [1] Anselin, L. (1995) 'LISA'. [2] Kaduna State MOH Plan 2021-2030. [3] World Bank Population Estimates.")
-            
+                st.caption("References: [1] Anselin, L. (1995) 'LISA'. [2] Kaduna State MOH Plan 2021-2030.")
             else:
                 st.error(f"Analysis Error: {res[6]}")
-
-        except Exception as outer_e:
-            st.error(f"System Error: {outer_e}")
+        else:
+            st.error("One or more spatial files could not be processed. Ensure ZIP files contain shapefiles at the root.")
