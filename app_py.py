@@ -14,82 +14,86 @@ import matplotlib.pyplot as plt
 import base64
 from engine_layer_py import run_analysis
 
-st.set_page_config(layout="wide", page_title="Kaduna Health DSS")
+st.set_page_config(layout="wide", page_title="Kaduna Strategic Health Intel")
 
-# --- BACKGROUND SETTING ---
+# --- BACKGROUND SETUP ---
 def set_bg(bin_file):
     try:
         with open(bin_file, 'rb') as f:
             data = f.read()
         bin_str = base64.b64encode(data).decode()
-        st.markdown(f'''<style>.stApp {{background-image: url("data:image/png;base64,{bin_str}"); background-size: cover;}} .main {{background-color: rgba(255, 255, 255, 0.97); padding: 40px;}}</style>''', unsafe_allow_html=True)
+        st.markdown(f'''<style>.stApp {{background-image: url("data:image/png;base64,{bin_str}"); background-size: cover;}} .main {{background-color: rgba(255, 255, 255, 0.98); padding: 30px; border-radius: 20px;}}</style>''', unsafe_allow_html=True)
     except: pass
 
 set_bg('background.png')
 
 st.title("KADUNA STATE STRATEGIC HEALTH INTELLIGENCE")
+st.write("Outpatient Utilization & Spatial Accessibility Analysis")
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("Data Upload")
-    outs = st.file_uploader("Outpatient Data", accept_multiple_files=True)
-    facs = st.file_uploader("Facilities (Zip)", type=['zip'])
-    lgas = st.file_uploader("Boundaries (Zip)", type=['zip'])
-    roads = st.file_uploader("Roads (gpkg)", type=['gpkg'])
-    pops = st.file_uploader("Population (tif)", type=['tif'])
-    run = st.button("GENERATE REPORT")
+    st.header("Project Data Portal")
+    outs = st.file_uploader("Outpatient Data (Excel)", accept_multiple_files=True)
+    facs = st.file_uploader("Health Facilities (Zip)", type=['zip'])
+    lgas = st.file_uploader("LGA Boundaries (Zip)", type=['zip'])
+    roads = st.file_uploader("Road Network (gpkg)", type=['gpkg'])
+    pops = st.file_uploader("Population Raster (tif)", type=['tif'])
+    run = st.button("GENERATE DASHBOARD")
     
     st.markdown("---")
-    with st.expander("References"):
+    with st.expander("Technical References"):
         st.caption("Anselin, L. (1995) 'LISA'")
         st.caption("Kaduna State MOH Strategic Plan")
 
-# --- MAIN CONTENT ---
+# --- EXECUTION ---
 if run and all([outs, facs, lgas, roads, pops]):
-    res = run_analysis(gpd.read_file(facs), gpd.read_file(roads), gpd.read_file(lgas), outs, pops)
+    with st.spinner("Analyzing spatial trends..."):
+        res = run_analysis(gpd.read_file(facs), gpd.read_file(roads), gpd.read_file(lgas), outs, pops)
     
     if res[0] is not None:
-        annual_maps, mi, deserts, pop_map = res
+        annual_maps, seasonal_table, mi, deserts, pop_map = res
         
-        # 1. Moran's I Result
+        # 1. MORAN'S I
         st.header("1. Spatial Autocorrelation (Global Moran’s I)")
-        col1, col2 = st.columns(2)
-        col1.metric("Moran's I Index", round(mi.I, 4))
-        col2.write(f"**Spatial Characterization:** {'Dispersed' if mi.I < 0 else 'Clustered'}")
-        st.info("This confirms the report finding of spatial dispersion across the state.")
+        c1, c2 = st.columns(2)
+        c1.metric("Moran's I Index", round(mi.I, 4))
+        c2.info(f"The analysis confirms a **{'Spatial Dispersed' if mi.I < 0 else 'Spatial Clustered'}** pattern (p={round(mi.p_sim, 4)}).")
 
-        # 2. Graduated Maps (NO MORE ERRORS)
-        st.header("2. Outpatient Attendance Intensity (Rate per 1000)")
+        # 2. GRADUATED INTENSITY MAPS
+        st.header("2. Outpatient Attendance Intensity (Rate per 1,000)")
         years = sorted(annual_maps.keys())
-        cols = st.columns(len(years))
+        cols = st.columns(3)
         for i, yr in enumerate(years):
-            with cols[i]:
+            with cols[i % 3]:
                 fig, ax = plt.subplots()
-                # Use simple 'linear' plotting to avoid classification errors
+                # Continuous color scale for stability
                 annual_maps[yr].plot(column=f'Rate_{yr}', cmap='YlGnBu', legend=True, ax=ax)
-                ax.set_title(f"Year {yr}")
+                ax.set_title(f"Attendance Rate {yr}")
                 ax.set_axis_off()
                 st.pyplot(fig)
 
-        # 3. Population Density
-        st.header("3. Population Density by LGA")
-        fig_p, ax_p = plt.subplots(figsize=(10, 4))
-        pop_map.plot(column='Population', cmap='Purples', legend=True, ax=ax_p)
-        ax_p.set_axis_off()
-        st.pyplot(fig_p)
-
-        # 4. Healthcare Deserts
-        st.header("4. Strategic Healthcare Deserts")
-        c1, c2 = st.columns([2, 1])
-        with c1:
+        # 3. POPULATION & DESERTS
+        st.header("3. Population Density & Healthcare Deserts")
+        col_p, col_d = st.columns(2)
+        with col_pop:
+            fig_p, ax_p = plt.subplots()
+            pop_map.plot(column='Population', cmap='Purples', legend=True, ax=ax_p)
+            ax_p.set_axis_off()
+            st.pyplot(fig_p)
+        with col_des:
             fig_d, ax_d = plt.subplots()
             annual_maps[max(years)].boundary.plot(ax=ax_d, color='black', linewidth=0.5)
-            deserts.plot(ax=ax_d, color='red', alpha=0.7)
+            deserts.plot(ax=ax_d, color='#e63946', alpha=0.7)
             ax_d.set_axis_off()
             st.pyplot(fig_d)
-        with c2:
-            st.subheader("Priority Underserved LGAs")
-            st.table(pd.DataFrame(deserts['NAME_2'].unique(), columns=["LGA Name"]))
 
+        # 4. STAKEHOLDER TABLE
+        st.header("4. Seasonal Trends & Priority LGAs")
+        t1, t2 = st.tabs(["Seasonal Utilization", "Priority Intervention LGAs"])
+        with t1:
+            st.dataframe(seasonal_table.style.highlight_max(axis=1, color='#90ee90'), use_container_width=True)
+        with t2:
+            st.write("The following LGAs contain 'Desert' zones (Red areas on map) and require urgent health facility expansion:")
+            st.table(pd.DataFrame(deserts['NAME_2'].unique(), columns=["LGA Priority List"]))
     else:
-        st.error(f"Analysis failed: {res[3]}")
+        st.error(f"Analysis failed: {res[4]}")
