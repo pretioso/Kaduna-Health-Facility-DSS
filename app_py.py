@@ -19,25 +19,19 @@ from engine_layer_py import run_analysis
 
 st.set_page_config(layout="wide", page_title="Kaduna Strategic Health Intel")
 
-# --- Safe File Reading Helper ---
 def safe_read(uploaded_file):
-    # Create a temporary file to store the upload
     suffix = os.path.splitext(uploaded_file.name)[1]
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
         tmp.write(uploaded_file.getbuffer())
         tmp_path = tmp.name
-    
     try:
-        # Use the zip:// prefix for .zip files to help pyogrio/fiona
         if uploaded_file.name.endswith('.zip'):
             df = gpd.read_file(f"zip://{tmp_path}")
         else:
             df = gpd.read_file(tmp_path)
         return df
     finally:
-        # Clean up the temp file after reading
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+        if os.path.exists(tmp_path): os.unlink(tmp_path)
 
 def set_style(is_homepage=True):
     if is_homepage:
@@ -46,15 +40,16 @@ def set_style(is_homepage=True):
                 data = f.read()
             bin_str = base64.b64encode(data).decode()
             style = f'''<style>.stApp {{background-image: url("data:image/png;base64,{bin_str}"); background-size: cover;}}
-            .main {{background: rgba(0,0,0,0.6); color: white; padding: 50px; text-align: center; border-radius: 0px; box-shadow: none;}}</style>'''
+            .main {{background: rgba(0,0,0,0.6); color: white; padding: 50px; text-align: center;}}</style>'''
         except: style = ""
     else:
+        # FORCE BLACK TEXT FOR TABLES AND DASHBOARD
         style = '''<style>.stApp {background-color: white;} 
-        .main {background: white; color: black; padding: 20px; border-radius: 0px; box-shadow: none;}
+        .main {background: white; color: black !important; padding: 20px;}
         [data-testid="stSidebar"] {background-color: #1e293b !important; color: white;}
-        h1, h2, h3 {color: black !important; font-weight: 800; border-bottom: none;}
-        table {border: 1px solid black !important;}
-        hr {border: 0.5px solid #eeeeee;}</style>'''
+        h1, h2, h3, p, span, div {color: black !important; font-weight: 800;}
+        .stMarkdown, .stTable, table, td, th {color: black !important; border: 1px solid #ddd !important;}
+        thead tr th {background-color: #f0f2f6 !important; color: black !important;}</style>'''
     st.markdown(style, unsafe_allow_html=True)
 
 if 'analyzed' not in st.session_state: st.session_state.analyzed = False
@@ -66,10 +61,8 @@ with st.sidebar:
     lgas = st.file_uploader("LGA Boundaries (Zip)", type=['zip'])
     roads = st.file_uploader("Roads (gpkg)", type=['gpkg'])
     pops = st.file_uploader("Population (tif)", type=['tif'])
-    
     if st.button("🚀 GENERATE DECISION MATRIX", use_container_width=True):
-        if all([outs, facs, lgas, roads, pops]):
-            st.session_state.analyzed = True
+        if all([outs, facs, lgas, roads, pops]): st.session_state.analyzed = True
 
 if not st.session_state.analyzed:
     set_style(is_homepage=True)
@@ -80,79 +73,72 @@ else:
     st.title("Strategic Analysis Dashboard")
     
     with st.spinner("Processing Data..."):
-        # Use the safe_read helper for all spatial files
-        facilities_gdf = safe_read(facs)
-        roads_gdf = safe_read(roads)
-        lgas_gdf = safe_read(lgas)
-        
-        # Run analysis (Passing the pre-read GeoDataFrames)
-        res = run_analysis(facilities_gdf, roads_gdf, lgas_gdf, outs, pops)
+        f_gdf = safe_read(facs)
+        r_gdf = safe_read(roads)
+        l_gdf = safe_read(lgas)
+        res = run_analysis(f_gdf, r_gdf, l_gdf, outs, pops)
     
     if res[0] is not None:
-        annual_maps, mi, deserts, iso30, iso60, lga_b, road_net = res
+        annual_maps, deserts, iso30, iso60, lga_b, road_net = res
         
-        # --- SECTION 1: ATTENDANCE INTENSITY ---
-        st.header("1. Annual Outpatient Attendance Intensity")
+        # --- SECTION 1: GRADUATED COLOURS MAPS ---
+        st.header("1. Annual Outpatient Attendance Intensity (Rate per 1,000)")
         years = sorted(annual_maps.keys())
         cols = st.columns(3)
         for i, yr in enumerate(years):
             with cols[i % 3]:
                 fig1, ax1 = plt.subplots(figsize=(6, 6))
-                annual_maps[yr].plot(column=f'Rate_{yr}', cmap='YlGnBu', edgecolor='black', linewidth=0.5, legend=True, ax=ax1)
-                ax1.set_title(f"Year {yr} Intensity", fontsize=12, fontweight='bold')
+                # Ensure 'column' is specified to create the choropleth effect
+                annual_maps[yr].plot(column=f'Rate_{yr}', cmap='YlGnBu', 
+                                    edgecolor='black', linewidth=0.3, 
+                                    legend=True, 
+                                    legend_kwds={'label': "Rate per 1k", 'orientation': "horizontal"},
+                                    ax=ax1)
+                ax1.set_title(f"Year {yr}", fontsize=14, fontweight='bold')
                 ax1.set_axis_off()
                 st.pyplot(fig1)
 
         st.divider()
 
-        # --- SECTION 2: ACCESSIBILITY MAP ---
+        # --- SECTION 2: ACCESSIBILITY ---
         st.header("2. Facility Accessibility & Healthcare Deserts")
         fig2, ax2 = plt.subplots(figsize=(12, 12))
-        
-        # Basemap
-        lga_b.plot(ax=ax2, color='white', edgecolor='#666666', linewidth=0.8, zorder=1)
-        # Deserts & Isochrones
+        lga_b.plot(ax=ax2, color='white', edgecolor='black', linewidth=0.5, zorder=1)
         deserts.plot(ax=ax2, color='#ffcccc', zorder=2)
         iso60.plot(ax=ax2, color='#2ca02c', alpha=0.3, zorder=3)
         iso30.plot(ax=ax2, color='#1f77b4', alpha=0.5, zorder=4)
-        # Roads (Black lines) & Facilities (Red points)
-        road_net.to_crs(epsg=4326).plot(ax=ax2, color='black', linewidth=0.4, alpha=0.6, zorder=5)
-        facilities_gdf.to_crs(epsg=4326).plot(ax=ax2, color='red', markersize=15, marker='+', zorder=6)
-        
-        legend_elements = [
-            Line2D([0], [0], color='#666666', lw=1, label='LGA Boundary'),
-            Line2D([0], [0], color='black', lw=0.5, label='Road Network'),
-            Line2D([0], [0], marker='s', color='w', label='Desert (>60 min)', markerfacecolor='#ffcccc', markersize=15),
-            Line2D([0], [0], marker='+', color='red', label='Health Facility', markersize=10, ls='')
-        ]
-        ax2.legend(handles=legend_elements, loc='lower right')
+        road_net.to_crs(epsg=4326).plot(ax=ax2, color='black', linewidth=0.4, alpha=0.4, zorder=5)
+        f_gdf.to_crs(epsg=4326).plot(ax=ax2, color='red', markersize=20, marker='+', zorder=6)
         ax2.set_axis_off()
         st.pyplot(fig2)
 
         st.divider()
 
-        # --- SECTION 3: LONGITUDINAL TABLE ---
-        st.header("3. Longitudinal Outpatient Attendance Rates by LGA")
+        # --- SECTION 3: VISIBLE TABLE ---
+        st.header("3. Longitudinal Outpatient Attendance Rates (2019 – 2024)")
         table_df = pd.DataFrame({
             "LGA": ["Birnin Gwari", "Chikun", "Giwa", "Igabi", "Ikara", "Jaba", "Jema'a", "Kachia", "Kaduna North", "Kaduna South", "Kagarko", "Kajuru", "Kaura", "Kauru", "Kubau", "Kudan", "Lere", "Makarfi", "Sabon Gari", "Sanga", "Soba", "Zangon Kataf", "Zaria"],
-            "Pre-COVID (2019)": [27.80, 13.07, 41.30, 5.32, 28.87, 30.53, 22.25, 11.07, 21.07, 42.42, 19.67, 18.36, 14.34, 17.10, 21.91, 22.10, 21.63, 48.34, 18.06, 36.26, 28.42, 9.06, 27.68],
-            "COVID Era (2020-21)": [33.44, 11.98, 54.36, 5.52, 39.44, 39.55, 24.37, 11.48, 18.77, 41.12, 24.32, 28.52, 15.22, 20.95, 28.91, 24.81, 30.09, 54.17, 22.78, 39.20, 24.91, 11.63, 33.41],
-            "Post-COVID (2022-24)": [42.74, 13.32, 73.53, 6.54, 42.78, 49.52, 32.82, 18.81, 69.88, 48.07, 25.17, 86.19, 15.66, 23.10, 40.12, 29.04, 50.37, 57.96, 37.52, 36.73, 35.71, 12.04, 45.44],
+            "2019": [27.80, 13.07, 41.30, 5.32, 28.87, 30.53, 22.25, 11.07, 21.07, 42.42, 19.67, 18.36, 14.34, 17.10, 21.91, 22.10, 21.63, 48.34, 18.06, 36.26, 28.42, 9.06, 27.68],
+            "2020-21": [33.44, 11.98, 54.36, 5.52, 39.44, 39.55, 24.37, 11.48, 18.77, 41.12, 24.32, 28.52, 15.22, 20.95, 28.91, 24.81, 30.09, 54.17, 22.78, 39.20, 24.91, 11.63, 33.41],
+            "2022-24": [42.74, 13.32, 73.53, 6.54, 42.78, 49.52, 32.82, 18.81, 69.88, 48.07, 25.17, 86.19, 15.66, 23.10, 40.12, 29.04, 50.37, 57.96, 37.52, 36.73, 35.71, 12.04, 45.44],
             "Trajectory": ["Consistent Growth", "V-Shaped Recovery", "Consistent Growth", "Marginal Increase", "Consistent Growth", "Consistent Growth", "Consistent Growth", "Post-COVID Surge", "Strong Recovery", "V-Shaped Recovery", "Consistent Growth", "Exceptional Surge", "Stable", "Consistent Growth", "Consistent Growth", "Consistent Growth", "Consistent Growth", "High Baseline/Stable", "Consistent Growth", "COVID-Peak/Decline", "V-Shaped Recovery", "Consistent Growth", "Consistent Growth"]
         })
         st.table(table_df)
 
         st.divider()
 
-        # --- SECTION 4: PRIORITY LIST ---
+        # --- SECTION 4: VISIBLE LIST ---
         st.header("4. Facility Priority & Intervention Roadmap")
+        st.info("The following LGAs are designated for urgent infrastructure expansion based on spatial demand and current service gaps.")
+        # Using Markdown with bolding to ensure readability
         st.markdown("""
-        **Infrastructure Priority LGAs (Immediate Construction Needed):**
-        * **Kajuru & Kaduna North**: Addressing 'Exceptional Surge' in outpatient demand.
-        * **Birnin Gwari & Kachia**: Targeted PHC construction in 'Healthcare Desert' zones.
-        * **Giwa & Lere**: Capacity scaling to sustain 'Consistent Growth'.
+        ### **Priority Intervention Zones:**
+        1. **Kajuru & Kaduna North**: Immediate facility expansion required due to **Exceptional Post-COVID Surges**.
+        2. **Birnin Gwari & Kachia**: Priority for PHC construction in identified **Healthcare Deserts**.
+        3. **Giwa & Lere**: Infrastructure scaling required to support **Consistent Outpatient Growth**.
+        4. **Zaria & Makarfi**: Maintain capacity to support high baseline utilization.
         """)
 
-        st.caption("References: [1] Anselin, L. (1995) 'LISA'. [2] Kaduna State MOH Development Plan 2021-2030. [3] World Bank Population Estimates.")
+        st.caption("References: [1] Anselin, L. (1995). [2] Kaduna State MOH Development Plan.")
     else:
         st.error(f"Analysis failed: {res[6]}")
