@@ -19,7 +19,7 @@ from esda.moran import Moran
 
 def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
     try:
-        # 1. Spatial Prep
+        # 1. Spatial Prep & Population
         lga_boundary = lga_boundary.to_crs(epsg=4326)
         with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
             tmp.write(population_tif.read())
@@ -32,7 +32,7 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
         def clean_name(name): return re.sub(r'[^A-Z0-9]', '', str(name).upper())
         lga_boundary["MATCH_KEY"] = lga_boundary["NAME_2"].apply(clean_name)
 
-        # 3. Multi-Year Processing
+        # 3. Multi-Year Processing (2019-2024)
         all_data = []
         for file in outpatient_files:
             df = pd.read_excel(file)
@@ -52,26 +52,29 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
             agg = yr_df.groupby('LGA_CLEAN')['Total'].sum().reset_index()
             merged = lga_boundary.merge(agg, left_on="MATCH_KEY", right_on="LGA_CLEAN", how="left").fillna(0)
             merged[f'Rate_{yr}'] = (merged['Total'] / merged['Population']) * 1000
-            # Jitter for Moran's I stability
             merged[f'Rate_{yr}'] += np.random.normal(0, 1e-9, len(merged))
             annual_results[yr] = merged
 
-        # 4. Moran's I (Latest Year)
+        # 4. Moran's I
         latest_yr = max(annual_results.keys())
         w = lp.weights.Queen.from_dataframe(annual_results[latest_yr])
         w.transform = 'R'
         mi = Moran(annual_results[latest_yr][f'Rate_{latest_yr}'], w)
 
-        # 5. Desert Logic (Showing Boundaries)
+        # 5. Isochrone/Desert Logic (Simulation of 30/60 min travel)
         fac_metric = facilities_df.to_crs(epsg=32632)
         lga_metric = lga_boundary.to_crs(epsg=32632)
-        coverage = fac_metric.buffer(30000).union_all()
-        deserts_geom = gpd.overlay(lga_metric, gpd.GeoDataFrame(geometry=[coverage], crs=32632), how='difference')
         
-        # Highlight LGAs that have "Desert" patches inside them
-        desert_lga_names = deserts_geom['NAME_2'].unique()
-        desert_boundary_map = lga_boundary[lga_boundary['NAME_2'].isin(desert_lga_names)]
+        # Creating buffers for 30min (approx 15km) and 60min (approx 30km) for the visual
+        iso_30 = fac_metric.buffer(15000).union_all()
+        iso_60 = fac_metric.buffer(30000).union_all()
         
-        return annual_results, mi, desert_boundary_map, lga_boundary
+        isochrones_30 = gpd.GeoDataFrame(geometry=[iso_30], crs=32632).to_crs(epsg=4326)
+        isochrones_60 = gpd.GeoDataFrame(geometry=[iso_60], crs=32632).to_crs(epsg=4326)
+        
+        # Deserts are areas in LGA not covered by 60 min
+        healthcare_deserts = gpd.overlay(lga_boundary, isochrones_60, how='difference')
+        
+        return annual_results, mi, healthcare_deserts, isochrones_30, isochrones_60, lga_boundary
     except Exception as e:
-        return None, None, None, str(e)
+        return None, None, None, None, None, str(e)
