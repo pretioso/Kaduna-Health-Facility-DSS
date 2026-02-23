@@ -91,3 +91,70 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
         return annual_maps, seasonal_table, mi, deserts, lga_boundary
     except Exception as e:
         return None, None, None, None, str(e)
+import streamlit as st
+import geopandas as gpd
+import pandas as pd
+import numpy as np
+import re
+from rasterstats import zonal_stats
+import tempfile, os
+import libpysal as lp
+from esda.moran import Moran
+
+def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
+    try:
+        # 1. Align Coordinates
+        lga_boundary = lga_boundary.to_crs(epsg=4326)
+        
+        # 2. Extract Population
+        with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
+            tmp.write(population_tif.read())
+            tmp_path = tmp.name
+        stats = zonal_stats(lga_boundary, tmp_path, stats=["sum"])
+        lga_boundary["Population"] = [max(s["sum"], 1) if s and s["sum"] else 1000 for s in stats]
+        os.unlink(tmp_path)
+        
+        # 3. Standardize Names
+        lga_boundary["NAME_UP"] = lga_boundary["NAME_2"].astype(str).str.strip().str.upper()
+
+        # 4. Process Outpatient Data
+        all_data = []
+        for file in outpatient_files:
+            df = pd.read_excel(file)
+            if 'Year' not in df.columns:
+                match = re.search(r'(\d{4})', file.name)
+                df['Year'] = int(match.group(1)) if match else 2024
+            df["LGA_CLEAN"] = df["LGA"].astype(str).str.replace("^kd\s+", "", regex=True, case=False).str.strip().str.upper()
+            all_data.append(df)
+        
+        raw_df = pd.concat(all_data, ignore_index=True)
+        month_cols = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        
+        annual_maps = {}
+        for yr in sorted(raw_df['Year'].unique()):
+            yr_df = raw_df[raw_df['Year'] == yr].copy()
+            yr_df['Total_Yearly'] = yr_df[month_cols].sum(axis=1)
+            agg = yr_df.groupby('LGA_CLEAN')['Total_Yearly'].sum().reset_index()
+            
+            # Ensure all LGAs in the map have a record (prevents NaN Moran's I)
+            merged = lga_boundary.merge(agg, left_on="NAME_UP", right_on="LGA_CLEAN", how="left")
+            merged['Total_Yearly'] = merged['Total_Yearly'].fillna(0)
+            merged[f'Rate_{yr}'] = (merged['Total_Yearly'] / merged['Population']) * 1000
+            annual_maps[yr] = merged
+
+        # 5. Global Moran's I
+        latest_yr = max(annual_maps.keys())
+        map_final = annual_maps[latest_yr]
+        w = lp.weights.Queen.from_dataframe(map_final)
+        w.transform = 'R'
+        mi = Moran(map_final[f'Rate_{latest_yr}'], w)
+
+        # 6. Healthcare Deserts (30km Buffer)
+        fac_metric = facilities_df.to_crs(epsg=32632)
+        lga_metric = lga_boundary.to_crs(epsg=32632)
+        coverage = fac_metric.buffer(30000).union_all()
+        deserts = gpd.overlay(lga_metric, gpd.GeoDataFrame(geometry=[coverage], crs=32632), how='difference')
+        
+        return annual_maps, mi, deserts, lga_boundary
+    except Exception as e:
+        return None, None, None, str(e)
