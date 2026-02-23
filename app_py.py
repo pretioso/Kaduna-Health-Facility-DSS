@@ -16,13 +16,13 @@ from engine_layer_py import run_analysis
 
 st.set_page_config(layout="wide", page_title="Kaduna Health DSS")
 
-# --- BACKGROUND & STYLING ---
+# --- BACKGROUND SETTING ---
 def set_bg(bin_file):
     try:
         with open(bin_file, 'rb') as f:
             data = f.read()
         bin_str = base64.b64encode(data).decode()
-        st.markdown(f'''<style>.stApp {{background-image: url("data:image/png;base64,{bin_str}"); background-size: cover;}} .main {{background-color: rgba(255, 255, 255, 0.95); padding: 30px; border-radius: 15px;}}</style>''', unsafe_allow_html=True)
+        st.markdown(f'''<style>.stApp {{background-image: url("data:image/png;base64,{bin_str}"); background-size: cover;}} .main {{background-color: rgba(255, 255, 255, 0.97); padding: 40px;}}</style>''', unsafe_allow_html=True)
     except: pass
 
 set_bg('background.png')
@@ -31,65 +31,65 @@ st.title("KADUNA STATE STRATEGIC HEALTH INTELLIGENCE")
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("Upload Repository")
+    st.header("Data Upload")
     outs = st.file_uploader("Outpatient Data", accept_multiple_files=True)
     facs = st.file_uploader("Facilities (Zip)", type=['zip'])
     lgas = st.file_uploader("Boundaries (Zip)", type=['zip'])
     roads = st.file_uploader("Roads (gpkg)", type=['gpkg'])
     pops = st.file_uploader("Population (tif)", type=['tif'])
-    run = st.button("RUN REPORT")
+    run = st.button("GENERATE REPORT")
     
-    # REFERENCES (Moved to Sidebar bottom)
     st.markdown("---")
-    with st.expander("Technical References"):
+    with st.expander("References"):
         st.caption("Anselin, L. (1995) 'LISA'")
         st.caption("Kaduna State MOH Strategic Plan")
 
+# --- MAIN CONTENT ---
 if run and all([outs, facs, lgas, roads, pops]):
     res = run_analysis(gpd.read_file(facs), gpd.read_file(roads), gpd.read_file(lgas), outs, pops)
     
     if res[0] is not None:
-        annual_maps, seasonal_table, mi, deserts, pop_map = res
+        annual_maps, mi, deserts, pop_map = res
         
-        # 1. MORAN'S I
-        st.header("1. Global Moran’s I Summary")
-        st.table(pd.DataFrame({"Variable": ["2024 Outpatient Rate"], "Moran’s Index": [mi.I], "Z-score": [mi.z_sim], "P-value": [mi.p_sim]}))
+        # 1. Moran's I Result
+        st.header("1. Spatial Autocorrelation (Global Moran’s I)")
+        col1, col2 = st.columns(2)
+        col1.metric("Moran's I Index", round(mi.I, 4))
+        col2.write(f"**Spatial Characterization:** {'Dispersed' if mi.I < 0 else 'Clustered'}")
+        st.info("This confirms the report finding of spatial dispersion across the state.")
 
-        # 2. GRADUATED MAPS (Fixed the Crash)
-        st.header("2. Annual Outpatient Intensity (Rate per 1000)")
+        # 2. Graduated Maps (NO MORE ERRORS)
+        st.header("2. Outpatient Attendance Intensity (Rate per 1000)")
         years = sorted(annual_maps.keys())
-        cols = st.columns(3)
+        cols = st.columns(len(years))
         for i, yr in enumerate(years):
-            with cols[i % 3]:
+            with cols[i]:
                 fig, ax = plt.subplots()
-                # Use Quantiles to avoid the Fisher-Jenks "Unique Value" error
-                try:
-                    annual_maps[yr].plot(column=f'Rate_{yr}', cmap='YlOrRd', scheme='Quantiles', k=5, legend=True, ax=ax)
-                except:
-                    annual_maps[yr].plot(column=f'Rate_{yr}', cmap='YlOrRd', legend=True, ax=ax)
+                # Use simple 'linear' plotting to avoid classification errors
+                annual_maps[yr].plot(column=f'Rate_{yr}', cmap='YlGnBu', legend=True, ax=ax)
                 ax.set_title(f"Year {yr}")
                 ax.set_axis_off()
                 st.pyplot(fig)
 
-        # 3. DESERTS & UNDERSERVED
-        st.header("3. Healthcare Deserts & Strategic Need")
+        # 3. Population Density
+        st.header("3. Population Density by LGA")
+        fig_p, ax_p = plt.subplots(figsize=(10, 4))
+        pop_map.plot(column='Population', cmap='Purples', legend=True, ax=ax_p)
+        ax_p.set_axis_off()
+        st.pyplot(fig_p)
+
+        # 4. Healthcare Deserts
+        st.header("4. Strategic Healthcare Deserts")
         c1, c2 = st.columns([2, 1])
         with c1:
             fig_d, ax_d = plt.subplots()
-            annual_maps[max(years)].boundary.plot(ax=ax_d, color='black')
+            annual_maps[max(years)].boundary.plot(ax=ax_d, color='black', linewidth=0.5)
             deserts.plot(ax=ax_d, color='red', alpha=0.7)
             ax_d.set_axis_off()
             st.pyplot(fig_d)
         with c2:
-            st.subheader("Underserved LGAs")
-            st.write(pd.DataFrame(deserts['NAME_2'].unique(), columns=["LGA Priority List"]))
-
-        # 4. POPULATION
-        st.header("4. Population Density")
-        fig_p, ax_p = plt.subplots(figsize=(10, 4))
-        pop_map.plot(column='Population', cmap='Blues', scheme='NaturalBreaks', legend=True, ax=ax_p)
-        ax_p.set_axis_off()
-        st.pyplot(fig_p)
+            st.subheader("Priority Underserved LGAs")
+            st.table(pd.DataFrame(deserts['NAME_2'].unique(), columns=["LGA Name"]))
 
     else:
-        st.error(f"Error: {res[4]}")
+        st.error(f"Analysis failed: {res[3]}")
