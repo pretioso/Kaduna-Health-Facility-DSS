@@ -7,3 +7,5 @@ rasterstats
 libpysal
 esda
 openpyxl
+pyogrio
+rtree
