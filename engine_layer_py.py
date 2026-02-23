@@ -10,64 +10,69 @@ Original file is located at
 import streamlit as st
 import geopandas as gpd
 import pandas as pd
-import base64
-import matplotlib.pyplot as plt
-from engine_layer_py import run_analysis
+import numpy as np
+import re
+from rasterstats import zonal_stats
+import tempfile
+import os
+from esda.moran import Moran
+import libpysal as lp
 
-# 1. Background CSS (Top-center fix)
-def set_bg(bin_file):
-    with open(bin_file, 'rb') as f:
-        bin_str = base64.b64encode(f.read()).decode()
-    st.markdown(f'''<style>.stApp {{background-image: url("data:image/png;base64,{bin_str}"); background-size: cover; background-position: top center; background-attachment: fixed;}} .main {{background-color: rgba(255,255,255,0.9); padding: 25px; border-radius: 15px;}}</style>''', unsafe_allow_html=True)
+def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
+    try:
+        # 1. Zonal Population (Notebook Cell 3)
+        with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
+            tmp.write(population_tif.read())
+            tmp_path = tmp.name
+        stats = zonal_stats(lga_boundary, tmp_path, stats=["sum"])
+        lga_boundary["Population"] = [max(s["sum"], 1) if s and s["sum"] else 1000 for s in stats]
+        os.unlink(tmp_path)
 
-try: set_bg('background.png')
-except: pass
-
-st.title("KADUNA HEALTH STRATEGIC DSS")
-
-# 2. Sidebar Uploads
-with st.sidebar:
-    st.header("Strategic Input")
-    out_files = st.file_uploader("Outpatient Data", accept_multiple_files=True)
-    fac_file = st.file_uploader("Facilities (Zip)", type=['zip'])
-    lga_file = st.file_uploader("Boundaries (Zip)", type=['zip'])
-    road_file = st.file_uploader("Road Network (gpkg)", type=['gpkg'])
-    pop_file = st.file_uploader("Population (tif)", type=['tif'])
-    run_btn = st.button("Generate Priority Analysis")
-
-# 3. Execution and Result Display
-if run_btn and all([out_files, fac_file, lga_file, road_file, pop_file]):
-    with st.spinner("Calculating Health Utilization Rates..."):
-        spatial_data, moran_report, msg = run_analysis(gpd.read_file(fac_file), gpd.read_file(road_file), gpd.read_file(lga_file), out_files, pop_file)
-    
-    if spatial_data is not None:
-        # MAP OUTPUTS
-        st.header("I. Spatial Utilization Heatmaps")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("Outpatient Rate (per 1,000)")
-            fig, ax = plt.subplots()
-            spatial_data.plot(column='Rate_Per_1000', cmap='RdYlGn', legend=True, ax=ax)
-            st.pyplot(fig)
-        with col2:
-            st.subheader("Population Distribution")
-            fig2, ax2 = plt.subplots()
-            spatial_data.plot(column='Population', cmap='Purples', legend=True, ax=ax2)
-            st.pyplot(fig2)
-
-        # TABULAR OUTPUTS
-        st.header("II. LGA Priority & Infrastructure Table")
-        priority_df = spatial_data[['NAME_2', 'Rate_Per_1000', 'Min_Distance_Apart', 'Recommended_Infrastructure']].sort_values('Rate_Per_1000')
-        st.dataframe(priority_df.style.background_gradient(cmap='Reds_r', subset=['Rate_Per_1000']), use_container_width=True)
-
-        st.header("III. Moran's I Spatial Report")
-        st.table(moran_report)
+        # 2. Multi-Year Processing (Notebook Cell 1, 62)
+        all_data = []
+        for file in outpatient_files:
+            df = pd.read_excel(file)
+            if 'Year' not in df.columns:
+                match = re.search(r'(\d{4})', file.name)
+                df['Year'] = int(match.group(1)) if match else 2024
+            df["LGA"] = df["LGA"].astype(str).str.replace("^kd\s+", "", regex=True).str.strip().str.upper()
+            all_data.append(df)
         
-        # Implication Logic
-        res_text = moran_report.iloc[3]['Value']
-        if "Clustered" in res_text:
-            st.warning("**STRATEGIC IMPLICATION:** Significant clustering detected. This indicates that health facility usage is not equitable across the state. Priority LGAs (Red in table) are underserved 'Cold Spots' that require immediate facility upgrading.")
-        else:
-            st.info("**STRATEGIC IMPLICATION:** Usage patterns appear random. Infrastructure distribution is currently meeting the population's geographic needs without systematic bias.")
-    else:
-        st.error(f"Error: {msg}")
+        merged_df = pd.concat(all_data, ignore_index=True)
+        val_cols = [c for c in merged_df.columns if c not in ['LGA', 'Year']]
+        merged_df['Annual_Total'] = merged_df[val_cols].sum(axis=1)
+
+        # 3. Seasonality Analysis (Notebook Cell 73)
+        def get_season(m):
+            return "Dry/Harmattan" if m in ["Nov", "Dec", "Jan", "Feb", "Mar", "Apr"] else "Rainy"
+        
+        long_data = merged_df.melt(id_vars=["LGA", "Year"], value_vars=val_cols, var_name='Month', value_name='Count')
+        long_data['Season'] = long_data['Month'].apply(get_season)
+        seasonal_summary = long_data.groupby('Season')['Count'].mean().reset_index()
+
+        # 4. Desert Analysis (Notebook Cell 135)
+        facilities_metric = facilities_df.to_crs(epsg=32632)
+        coverage = facilities_metric.buffer(30000).union_all() # 30km/60min buffer
+        deserts = gpd.overlay(lga_boundary.to_crs(epsg=32632), gpd.GeoDataFrame(geometry=[coverage], crs=32632), how='difference')
+        underserved_lgas = deserts['NAME_2'].unique() if not deserts.empty else []
+
+        # 5. Annual Rate Maps & Moran's I
+        lga_boundary["NAME_2_UP"] = lga_boundary["NAME_2"].str.upper()
+        annual_maps = {}
+        
+        for yr in sorted(merged_df['Year'].unique()):
+            yr_data = merged_df[merged_df['Year'] == yr].groupby('LGA')['Annual_Total'].sum().reset_index()
+            map_data = lga_boundary.merge(yr_data, left_on='NAME_2_UP', right_on='LGA', how='left').fillna(0)
+            map_data['Rate_Per_10k'] = (map_data['Annual_Total'] / map_data['Population']) * 10000
+            annual_maps[yr] = map_data
+
+        # Moran's I on the most recent year
+        latest_map = annual_maps[max(annual_maps.keys())]
+        w = lp.weights.Queen.from_dataframe(latest_map)
+        w.transform = 'R'
+        mi = Moran(latest_map['Rate_Per_10k'], w)
+
+        return annual_maps, deserts, underserved_lgas, seasonal_summary, mi
+    except Exception as e:
+        st.error(f"Logic Error: {e}")
+        return None, None, None, None, None
