@@ -9,71 +9,108 @@ Original file is located at
 
 import streamlit as st
 import geopandas as gpd
-import matplotlib.pyplot as plt
-import seaborn as sns
 import pandas as pd
+import matplotlib.pyplot as plt
+import base64
 from engine_layer_py import run_analysis
 
-st.set_page_config(layout="wide", page_title="Kaduna Health Intelligence")
+# --- CONFIGURATION ---
+st.set_page_config(layout="wide", page_title="Kaduna Health Research Report")
 
-# 1. Dashboard Title & Context
-st.title("🏥 KADUNA STATE STRATEGIC HEALTH INTELLIGENCE")
-st.markdown("---")
+# --- BACKGROUND IMAGE HELPER ---
+def set_png_as_page_bg(bin_file):
+    try:
+        with open(bin_file, 'rb') as f:
+            data = f.read()
+        bin_str = base64.b64encode(data).decode()
+        page_bg_img = f'''
+        <style>
+        .stApp {{
+            background-image: url("data:image/png;base64,{bin_str}");
+            background-size: cover;
+            background-position: top center;
+            background-attachment: fixed;
+        }}
+        .main {{
+            background-color: rgba(255, 255, 255, 0.92);
+            padding: 30px;
+            border-radius: 15px;
+        }}
+        </style>
+        '''
+        st.markdown(page_bg_img, unsafe_allow_html=True)
+    except FileNotFoundError:
+        st.sidebar.warning("Background image 'background.png' not found.")
 
-# 2. Sidebar Uploads
+set_png_as_page_bg('background.png')
+
+# --- TITLE ---
+st.title("KADUNA STATE STRATEGIC HEALTH INTELLIGENCE")
+
+# --- SIDEBAR ---
 with st.sidebar:
-    st.header("Strategic Inputs")
+    st.header("Project Data Portal")
     outs = st.file_uploader("Outpatient Data", accept_multiple_files=True)
     facs = st.file_uploader("Facilities (Zip)", type=['zip'])
     lgas = st.file_uploader("Boundaries (Zip)", type=['zip'])
     roads = st.file_uploader("Roads (gpkg)", type=['gpkg'])
     pops = st.file_uploader("Population (tif)", type=['tif'])
-    process = st.button("Generate Stakeholder Report")
+    run = st.button("Generate Research Report")
 
-if process and all([outs, facs, lgas, roads, pops]):
-    annual_maps, deserts, underserved, long_data, mi = run_analysis(
+# --- ANALYSIS EXECUTION ---
+if run and all([outs, facs, lgas, roads, pops]):
+    results = run_analysis(
         gpd.read_file(facs), gpd.read_file(roads), gpd.read_file(lgas), outs, pops
     )
+    
+    if results[0] is not None:
+        annual_maps, seasonal_table, mi, deserts, pop_map = results
+        
+        # 1. MORAN'S I TABLE
+        st.header("1. Summary of Spatial Autocorrelation (Global Moran’s I)")
+        moran_df = pd.DataFrame({
+            "Variable": ["2024 Outpatient Rate"],
+            "Moran’s Index (I)": [round(mi.I, 4)],
+            "Z-score": [round(mi.z_sim, 4)],
+            "P-value": [round(mi.p_sim, 4)],
+            "Spatial Characterization": ["Spatial Dispersed" if mi.I < 0 else "Spatial Clustered"]
+        })
+        st.table(moran_df)
 
-    if annual_maps:
-        # --- TAB 1: TEMPORAL DISTRIBUTION ---
-        st.header("I. Annual Outpatient Distribution (Rate per 10k)")
-        years = list(annual_maps.keys())
-        cols = st.columns(len(years))
+        # 2. TEMPORAL MAPS
+        st.header("2. Annual Outpatient Attendance Distribution (2019-2024)")
+        map_cols = st.columns(3)
+        years = sorted(annual_maps.keys())
         for i, yr in enumerate(years):
-            with cols[i]:
-                st.subheader(f"Year {yr}")
+            with map_cols[i % 3]:
                 fig, ax = plt.subplots()
-                annual_maps[yr].plot(column='Rate_Per_10k', cmap='YlOrRd', legend=True, ax=ax)
+                annual_maps[yr].plot(column=f'Rate_{yr}', cmap='RdYlGn_r', legend=True, ax=ax)
+                ax.set_title(f"Year {yr} (per 1000)")
                 ax.set_axis_off()
                 st.pyplot(fig)
 
-        # --- TAB 2: HEALTHCARE DESERTS ---
-        st.header("II. Healthcare Deserts & Underserved LGAs")
-        c1, c2 = st.columns([2, 1])
-        with c1:
-            st.write("Red areas indicate locations >60 minutes from a facility.")
+        # 3. POPULATION MAP
+        st.header("3. Population Density by LGA")
+        fig_p, ax_p = plt.subplots(figsize=(10, 5))
+        pop_map.plot(column='Population', cmap='Blues', legend=True, ax=ax_p)
+        ax_p.set_axis_off()
+        st.pyplot(fig_p)
+
+        # 4. SEASONAL TABLE
+        st.header("4. Outpatient Attendance Rates by Season and LGA")
+        st.dataframe(seasonal_table.style.highlight_max(axis=1, color='#90ee90', subset=['Harmattan', 'Hot-Dry', 'Rainy Season']), use_container_width=True)
+
+        # 5. DESERTS
+        st.header("5. Strategic Infrastructure & Healthcare Deserts")
+        col_map, col_list = st.columns([2, 1])
+        with col_map:
             fig_d, ax_d = plt.subplots()
             annual_maps[max(years)].boundary.plot(ax=ax_d, color='black', linewidth=0.5)
-            deserts.to_crs(annual_maps[max(years)].crs).plot(ax=ax_d, color='red', alpha=0.7)
+            deserts.plot(ax=ax_d, color='#ff4b4b', alpha=0.7)
+            ax_d.set_axis_off()
             st.pyplot(fig_d)
-        with c2:
-            st.info("**Priority List: Underserved LGAs**")
-            st.table(pd.DataFrame(underserved, columns=["LGA Name"]))
-
-        # --- TAB 3: SEASONALITY ---
-        st.header("III. Seasonal Demand Analysis")
-        fig_s, ax_s = plt.subplots(figsize=(10, 4))
-        sns.boxplot(data=long_data, x='Season', y='Count', palette='Set2', ax=ax_s)
-        st.pyplot(fig_s)
-
-        # --- TAB 4: MORAN'S I ---
-        st.header("IV. Spatial Inequality (Moran's I)")
-        m1, m2 = st.columns(2)
-        m1.metric("Moran's I Index", round(mi.I, 4))
-        m1.metric("P-Value", round(mi.p_sim, 4))
-        
-        with m2:
-            conclusion = "Clustered (Inequitable)" if mi.I > 0 and mi.p_sim < 0.05 else "Random"
-            st.subheader(f"Status: {conclusion}")
-            st.write("**Stakeholder Implication:** Significant clustering means healthcare access is location-dependent. Policies must target 'Cold Spot' LGAs to reduce the state-wide inequality gap.")
+        with col_list:
+            st.subheader("Underserved LGAs")
+            st.write(pd.DataFrame(deserts['NAME_2'].unique(), columns=["LGA Priority List"]))
+    else:
+        st.error(f"Analysis Error: {results[4]}")
