@@ -9,3 +9,4 @@ esda
 openpyxl
 pyogrio
 rtree
+mapclassify
