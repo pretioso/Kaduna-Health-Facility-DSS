@@ -10,47 +10,72 @@ Original file is located at
 import streamlit as st
 import geopandas as gpd
 import pandas as pd
+import numpy as np
 import re
+import networkx as nx
+from shapely.geometry import Point, MultiPoint
+from sklearn.neighbors import BallTree
+from rasterstats import zonal_stats
+import tempfile
+import os
 from esda.moran import Moran
-from libpysal.weights import Queen
+import libpysal as lp
 
-def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files):
+def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
     try:
-        # 1. Clean and Combine Excel Data
+        # --- DATA CLEANING (Cell 12 & 16) ---
         all_data = []
         for file in outpatient_files:
             df = pd.read_excel(file)
             if 'Year' not in df.columns:
                 match = re.search(r'(\d{4})', file.name)
                 df['Year'] = int(match.group(1)) if match else 2024
-            
-            # Match notebook cleaning logic (force uppercase for joining)
-            df["LGA"] = df["LGA"].astype(str).str.replace("^kd\s+", "", regex=True).str.strip().str.upper()
             all_data.append(df)
         
-        raw_df = pd.concat(all_data, ignore_index=True)
+        merged_data = pd.concat(all_data, ignore_index=True)
+        merged_data["LGA"] = merged_data["LGA"].str.replace("^kd\s+", "", regex=True).str.replace("Kaduna State", "State Total", regex=False).str.strip().str.upper()
         
-        # Store Long Data for Trend Chart
-        month_cols = [c for c in raw_df.columns if c not in ["LGA", "Year"]]
-        st.session_state['long_data'] = raw_df.melt(id_vars=["LGA", "Year"], value_vars=month_cols, var_name='Month', value_name='Count')
+        # Melt and Map Months (Cell 9-16)
+        month_map = {"January":"Jan", "February":"Feb", "March":"Mar", "April":"Apr", "May":"May", "June":"Jun",
+                     "July":"Jul", "August":"Aug", "September":"Sep", "October":"Oct", "November":"Nov", "December":"Dec"}
+        month_cols = [c for c in merged_data.columns if c in month_map.keys()]
+        long_data = merged_data.melt(id_vars=["LGA", "Year"], value_vars=month_cols, var_name='Month', value_name='Outpatient_Count')
+        long_data["Month"] = long_data["Month"].map(month_map)
+        st.session_state['long_data'] = long_data
 
-        # 2. Spatial Join for Heatmap
-        latest_year = raw_df['Year'].max()
-        yearly_agg = raw_df[raw_df['Year'] == latest_year].groupby('LGA').sum(numeric_only=True).sum(axis=1).reset_index()
-        yearly_agg.columns = ['LGA', 'Total_Outpatient']
+        # --- POPULATION & RATES (Cell 3, 37, 46) ---
+        with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp_raster:
+            tmp_raster.write(population_tif.read())
+            raster_path = tmp_raster.name
         
-        # Merge with Boundary Shapefile
-        name_col = 'NAME_2' if 'NAME_2' in lga_boundary.columns else lga_boundary.columns[0]
-        lga_boundary[name_col] = lga_boundary[name_col].str.upper()
-        spatial_data = lga_boundary.merge(yearly_agg, left_on=name_col, right_on='LGA')
+        stats = zonal_stats(lga_boundary, raster_path, stats=["sum"], nodata=-9999)
+        lga_boundary["Population"] = [s["sum"] if s["sum"] else 0 for s in stats]
+        os.unlink(raster_path)
+        
+        # Calculate Rates
+        latest_year = merged_data['Year'].max()
+        yearly_agg = merged_data[merged_data['Year'] == latest_year].groupby('LGA')['Outpatient_Count'].sum().reset_index()
+        spatial_data = lga_boundary.copy()
+        spatial_data['NAME_2_UP'] = spatial_data['NAME_2'].str.upper()
+        spatial_data = spatial_data.merge(yearly_agg, left_on='NAME_2_UP', right_on='LGA', how='left')
+        spatial_data['Attendance_Rate'] = (spatial_data['Outpatient_Count'] / spatial_data['Population']) * 1000
 
-        if spatial_data.empty:
-            return None, f"Error: No matches found between Excel LGAs and Shapefile. Sample: {yearly_agg['LGA'].iloc[0]}"
+        # --- ISOCHRONES & DESERTS (Cell 135) ---
+        # 60-min coverage at 30km/h
+        roads_metric = roads_df.to_crs(epsg=32632)
+        facilities_metric = facilities_df.to_crs(epsg=32632)
+        roads_metric['travel_time_min'] = (roads_metric.geometry.length / 1000 / 30) * 60
+        
+        # Simple buffer approximation for speed, or full ego-graph if needed
+        coverage = facilities_metric.buffer(30000).union_all() # 30km ~ 60min at 30km/h
+        deserts = gpd.overlay(lga_boundary.to_crs(epsg=32632), gpd.GeoDataFrame(geometry=[coverage], crs=32632), how='difference')
 
-        # 3. Moran's I Calculation
-        w = Queen.from_dataframe(spatial_data)
-        st.session_state['moran_result'] = Moran(spatial_data['Total_Outpatient'], w)
+        # --- MORAN'S I (Cell 61) ---
+        w = lp.weights.Queen.from_dataframe(spatial_data.fillna(0))
+        w.transform = 'R'
+        mi = Moran(spatial_data['Attendance_Rate'].fillna(0), w)
+        st.session_state['moran_result'] = mi
 
-        return spatial_data, "Analysis Successful"
+        return deserts, spatial_data, "Spatio-temporal analysis complete."
     except Exception as e:
-        return None, f"Analysis Error: {str(e)}"
+        return None, None, f"Engine Error: {str(e)}"
