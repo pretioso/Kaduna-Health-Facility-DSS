@@ -20,19 +20,18 @@ from esda.moran import Moran
 
 def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
     try:
-        # --- 1. POPULATION & NAME CLEANING ---
+        # 1. POPULATION EXTRACTION
         with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
             tmp.write(population_tif.read())
             tmp_path = tmp.name
-        
         stats = zonal_stats(lga_boundary, tmp_path, stats=["sum"])
-        lga_col = 'NAME_2' if 'NAME_2' in lga_boundary.columns else lga_boundary.select_dtypes(include=['object']).columns[0]
         lga_boundary["Population"] = [max(s["sum"], 1) if s and s["sum"] else 1000 for s in stats]
         os.unlink(tmp_path)
         
-        lga_boundary["NAME_2_UP"] = lga_boundary[lga_col].str.strip().str.upper()
+        # 2. NAME MATCHING (STRICT)
+        lga_boundary["NAME_2_UP"] = lga_boundary["NAME_2"].str.strip().str.upper()
 
-        # --- 2. MULTI-YEAR DATA CONSOLIDATION ---
+        # 3. CONSOLIDATE YEARS
         all_data = []
         for file in outpatient_files:
             df = pd.read_excel(file)
@@ -43,54 +42,42 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
             all_data.append(df)
         
         raw_df = pd.concat(all_data, ignore_index=True)
-        month_keywords = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-        month_cols = [c for c in raw_df.columns if any(k in str(c) for k in month_keywords)]
+        month_cols = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
         
         annual_maps = {}
         for yr in sorted(raw_df['Year'].unique()):
             yr_df = raw_df[raw_df['Year'] == yr].copy()
-            yr_df['Annual_Sum'] = yr_df[month_cols].sum(axis=1)
-            agg = yr_df.groupby('LGA')['Annual_Sum'].sum().reset_index()
+            yr_df['Total'] = yr_df[month_cols].sum(axis=1)
+            agg = yr_df.groupby('LGA')['Total'].sum().reset_index()
             merged = lga_boundary.merge(agg, left_on="NAME_2_UP", right_on="LGA", how="left").fillna(0)
-            merged[f'Rate_{yr}'] = (merged['Annual_Sum'] / merged['Population']) * 1000
+            merged[f'Rate_{yr}'] = (merged['Total'] / merged['Population']) * 1000
             annual_maps[yr] = merged
 
-        # --- 3. SEASONAL ANALYSIS ---
+        # 4. SEASONALITY
         long_df = raw_df.melt(id_vars=["LGA", "Year"], value_vars=month_cols, var_name='Month', value_name='Count')
         long_df = long_df.merge(lga_boundary[['NAME_2_UP', 'Population']], left_on='LGA', right_on='NAME_2_UP')
         long_df['Rate'] = (long_df['Count'] / long_df['Population']) * 1000
         
         def get_season(m):
-            m = str(m).lower()
-            if any(x in m for x in ["nov", "dec", "jan", "feb"]): return "Harmattan"
-            if any(x in m for x in ["mar", "apr"]): return "Hot-Dry"
+            if m in ["November", "December", "January", "February"]: return "Harmattan"
+            if m in ["March", "April"]: return "Hot-Dry"
             return "Rainy Season"
         
         long_df['Season'] = long_df['Month'].apply(get_season)
         seasonal_table = long_df.groupby(['LGA', 'Season'])['Rate'].mean().unstack().reset_index()
-        available_seasons = [s for s in ['Harmattan', 'Hot-Dry', 'Rainy Season'] if s in seasonal_table.columns]
-        seasonal_table['Seasonal Peak'] = seasonal_table[available_seasons].idxmax(axis=1) if available_seasons else "N/A"
 
-        # --- 4. GLOBAL MORAN'S I (Reference Target: -0.2554) ---
-        latest_year = max(annual_maps.keys())
-        latest_map = annual_maps[latest_year]
-        w = lp.weights.Queen.from_dataframe(latest_map)
+        # 5. MORAN'S I (-0.2554)
+        latest_yr = max(annual_maps.keys())
+        w = lp.weights.Queen.from_dataframe(annual_maps[latest_yr])
         w.transform = 'R'
-        mi = Moran(latest_map[f'Rate_{latest_year}'], w)
+        mi = Moran(annual_maps[latest_yr][f'Rate_{latest_yr}'], w)
 
-        # --- 5. DESERT & INTERVENTION LOGIC ---
-        # Projecting to UTM 32N for accurate meter-based distance
+        # 6. DESERTS (30km Buffer)
+        fac_metric = facilities_df.to_crs(epsg=32632)
         lga_metric = lga_boundary.to_crs(epsg=32632)
-        facilities_metric = facilities_df.to_crs(epsg=32632)
-        
-        # 30km coverage (approx 60 min travel time)
-        coverage = facilities_metric.buffer(30000).union_all()
+        coverage = fac_metric.buffer(30000).union_all()
         deserts = gpd.overlay(lga_metric, gpd.GeoDataFrame(geometry=[coverage], crs=32632), how='difference')
         
-        # Identifying Priority LGAs (High Pop + In Desert)
-        deserts['Desert_Area_KM2'] = deserts.area / 10**6
-        priority_lgas = deserts.sort_values(by='Desert_Area_KM2', ascending=False)[[lga_col, 'Desert_Area_KM2']]
-
-        return annual_maps, seasonal_table, mi, deserts, lga_boundary, priority_lgas
+        return annual_maps, seasonal_table, mi, deserts, lga_boundary
     except Exception as e:
-        return None, None, None, None, None, str(e)
+        return None, None, None, None, str(e)
