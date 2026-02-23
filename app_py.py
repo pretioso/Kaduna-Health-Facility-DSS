@@ -14,71 +14,99 @@ import matplotlib.pyplot as plt
 import base64
 from engine_layer_py import run_analysis
 
-st.set_page_config(layout="wide", page_title="Kaduna Health Decision Support")
+st.set_page_config(layout="wide", page_title="Kaduna Strategic Health Intel")
 
-def set_bg(bin_file):
+# --- CUSTOM CSS FOR THE IMAGE-GENERATED LOOK ---
+def set_interface_style(bg_file, is_homepage=True):
     try:
-        with open(bin_file, 'rb') as f:
+        with open(bg_file, 'rb') as f:
             data = f.read()
         bin_str = base64.b64encode(data).decode()
-        st.markdown(f'''<style>.stApp {{background-image: url("data:image/png;base64,{bin_str}"); background-size: cover;}} .main {{background-color: rgba(255, 255, 255, 0.98); padding: 30px; border-radius: 15px;}}</style>''', unsafe_allow_html=True)
+        
+        if is_homepage:
+            # Full screen background for homepage
+            style = f'''<style>.stApp {{background-image: url("data:image/png;base64,{bin_str}"); background-size: cover;}}
+            .main {{background: rgba(0,0,0,0.5); color: white; border-radius: 20px; padding: 50px; text-align: center;}}</style>'''
+        else:
+            # Clean dashboard look with sidebar and white panels
+            style = f'''<style>.stApp {{background: #f4f7f6;}}
+            [data-testid="stSidebar"] {{background-color: #1e293b !important; color: white;}}
+            .main {{background: white; border-radius: 10px; padding: 20px; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);}}
+            h1, h2 {{color: #1e293b; font-weight: 700;}}</style>'''
+        st.markdown(style, unsafe_allow_html=True)
     except: pass
 
-set_bg('background.png')
+# Initialize State
+if 'analyzed' not in st.session_state:
+    st.session_state.analyzed = False
 
-st.title("KADUNA STATE STRATEGIC HEALTH INTELLIGENCE")
-st.subheader("Decision Support System (DSS) Implementation")
-
+# --- SIDEBAR (Always Visible) ---
 with st.sidebar:
-    st.header("Input Data")
+    st.title("📁 Input Data")
     outs = st.file_uploader("Outpatient Data (Excel)", accept_multiple_files=True)
     facs = st.file_uploader("Facilities (Zip)", type=['zip'])
     lgas = st.file_uploader("Boundaries (Zip)", type=['zip'])
     roads = st.file_uploader("Roads (gpkg)", type=['gpkg'])
     pops = st.file_uploader("Population (tif)", type=['tif'])
-    run = st.button("GENERATE DECISION MATRIX")
-    
-    st.markdown("---")
-    with st.expander("References"):
-        st.caption("Anselin, L. (1995) 'LISA'")
-        st.caption("Kaduna State MOH Strategic Plan")
+    if st.button("🚀 GENERATE DASHBOARD", use_container_width=True):
+        if all([outs, facs, lgas, roads, pops]):
+            st.session_state.analyzed = True
+        else:
+            st.error("Please upload all files first.")
 
-if run and all([outs, facs, lgas, roads, pops]):
-    with st.spinner("Processing..."):
-        res = run_analysis(gpd.read_file(facs), gpd.read_file(roads), gpd.read_file(lgas), outs, pops)
+# --- HOMEPAGE LOGIC ---
+if not st.session_state.analyzed:
+    set_interface_style('background.png', is_homepage=True)
+    st.title("KADUNA STATE STRATEGIC DECISION HEALTH INTELLIGENCE")
+    st.markdown("### Implementation Portal for Health Sector Decision-Making")
+    st.info("Please upload your spatial and health datasets in the sidebar to begin the analysis.")
+    
+# --- DASHBOARD LOGIC ---
+else:
+    set_interface_style('background.png', is_homepage=False)
+    st.title("Strategic Analysis Output")
+    
+    res = run_analysis(gpd.read_file(facs), gpd.read_file(roads), gpd.read_file(lgas), outs, pops)
     
     if res[0] is not None:
-        annual_maps, mi, deserts, pop_map, raw_check = res
+        annual_results, mi, desert_map, full_map = res
         
-        # 1. SPATIAL AUTOCORRELATION
-        st.header("1. Spatial Analysis (Global Moran’s I)")
-        col_m1, col_m2 = st.columns(2)
-        col_m1.metric("Moran's I Index", round(mi.I, 4))
-        col_m2.write(f"**Statistical Interpretation:** {'Spatial Dispersed' if mi.I < 0 else 'Spatial Clustered'}")
-        
-        # 2. MAPS
-        st.header("2. Outpatient Intensity & Service Gaps")
-        m_c1, m_c2 = st.columns(2)
-        
-        latest_yr = max(annual_maps.keys())
-        with m_c1:
-            st.write(f"**Attendance Intensity ({latest_yr})**")
-            fig1, ax1 = plt.subplots()
-            annual_maps[latest_yr].plot(column=f'Rate_{latest_yr}', cmap='YlGnBu', legend=True, ax=ax1)
-            ax1.set_axis_off()
-            st.pyplot(fig1)
-            
-        with m_c2:
-            st.write("**Healthcare Deserts (Gaps)**")
-            fig2, ax2 = plt.subplots()
-            annual_maps[latest_yr].boundary.plot(ax=ax2, color='black', linewidth=0.5)
-            deserts.plot(ax=ax2, color='red', alpha=0.7)
-            ax2.set_axis_off()
-            st.pyplot(fig2)
+        # 1. Multi-Year Maps (2019 - 2024)
+        st.header("Temporal Utilization Intensity (2019-2024)")
+        years = sorted(annual_results.keys())
+        cols = st.columns(3)
+        for i, yr in enumerate(years):
+            with cols[i % 3]:
+                fig, ax = plt.subplots(figsize=(5, 5))
+                annual_results[yr].plot(column=f'Rate_{yr}', cmap='YlGnBu', legend=True, ax=ax)
+                ax.set_title(f"LGA Outpatient Rate: {yr}", fontsize=12, fontweight='bold')
+                ax.set_axis_off()
+                st.pyplot(fig)
+                st.caption(f"Spatial distribution of health utilization in {yr}.")
 
-        # 3. DECISION TABLE
-        st.header("3. Intervention Priority List")
-        st.table(pd.DataFrame(deserts['NAME_2'].unique(), columns=["LGA for Priority Intervention"]))
+        st.divider()
+
+        # 2. Moran's I & Deserts
+        st.header("Spatial Autocorrelation & Resource Gaps")
+        c1, c2 = st.columns([1, 2])
         
+        with c1:
+            st.metric("Global Moran's I", round(mi.I, 4))
+            st.write("**Interpretation:**")
+            st.success("Spatial Dispersion Detected" if mi.I < 0 else "Spatial Clustering Detected")
+            st.markdown("---")
+            st.subheader("Priority LGAs")
+            st.table(pd.DataFrame(desert_map['NAME_2'].unique(), columns=["LGA Priority Name"]))
+
+        with c2:
+            st.write("**Healthcare Desert Boundaries (Target Areas)**")
+            fig_d, ax_d = plt.subplots(figsize=(8, 6))
+            full_map.boundary.plot(ax=ax_d, color='#CCCCCC', linewidth=0.5)
+            # Highlight only the borders of the LGAs with deserts
+            desert_map.plot(ax=ax_d, color='#e63946', alpha=0.5, edgecolor='darkred')
+            ax_d.set_title("Zones Requiring Infrastructure Intervention", fontsize=12)
+            ax_d.set_axis_off()
+            st.pyplot(fig_d)
+            
     else:
-        st.error(f"Error in data processing: {res[4]}")
+        st.error(f"Analysis Error: {res[3]}")
