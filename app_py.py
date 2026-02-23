@@ -32,9 +32,13 @@ def set_png_as_page_bg(bin_file):
             background-attachment: fixed;
         }}
         .main {{
-            background-color: rgba(255, 255, 255, 0.92);
+            background-color: rgba(255, 255, 255, 0.94);
             padding: 30px;
             border-radius: 15px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }}
+        h1, h2, h3 {{
+            color: #1e3d59;
         }}
         </style>
         '''
@@ -59,9 +63,10 @@ with st.sidebar:
 
 # --- ANALYSIS EXECUTION ---
 if run and all([outs, facs, lgas, roads, pops]):
-    results = run_analysis(
-        gpd.read_file(facs), gpd.read_file(roads), gpd.read_file(lgas), outs, pops
-    )
+    with st.spinner("Processing spatial data and seasonal trends..."):
+        results = run_analysis(
+            gpd.read_file(facs), gpd.read_file(roads), gpd.read_file(lgas), outs, pops
+        )
     
     if results[0] is not None:
         annual_maps, seasonal_table, mi, deserts, pop_map = results
@@ -79,13 +84,13 @@ if run and all([outs, facs, lgas, roads, pops]):
 
         # 2. TEMPORAL MAPS
         st.header("2. Annual Outpatient Attendance Distribution (2019-2024)")
-        map_cols = st.columns(3)
         years = sorted(annual_maps.keys())
+        map_cols = st.columns(min(len(years), 3))
         for i, yr in enumerate(years):
             with map_cols[i % 3]:
                 fig, ax = plt.subplots()
                 annual_maps[yr].plot(column=f'Rate_{yr}', cmap='RdYlGn_r', legend=True, ax=ax)
-                ax.set_title(f"Year {yr} (per 1000)")
+                ax.set_title(f"Year {yr} (Rate per 1000)")
                 ax.set_axis_off()
                 st.pyplot(fig)
 
@@ -96,21 +101,37 @@ if run and all([outs, facs, lgas, roads, pops]):
         ax_p.set_axis_off()
         st.pyplot(fig_p)
 
-        # 4. SEASONAL TABLE
+        # 4. SEASONAL TABLE (With Robust Highlighting)
         st.header("4. Outpatient Attendance Rates by Season and LGA")
-        st.dataframe(seasonal_table.style.highlight_max(axis=1, color='#90ee90', subset=['Harmattan', 'Hot-Dry', 'Rainy Season']), use_container_width=True)
+        # Identify which season columns actually exist in the results
+        possible_seasons = ['Harmattan', 'Hot-Dry', 'Rainy Season']
+        available_seasons = [s for s in possible_seasons if s in seasonal_table.columns]
+        
+        if available_seasons:
+            st.dataframe(
+                seasonal_table.style.highlight_max(axis=1, color='#90ee90', subset=available_seasons), 
+                use_container_width=True
+            )
+        else:
+            st.dataframe(seasonal_table, use_container_width=True)
 
         # 5. DESERTS
         st.header("5. Strategic Infrastructure & Healthcare Deserts")
         col_map, col_list = st.columns([2, 1])
         with col_map:
+            st.subheader("Map of Healthcare Deserts (Uncovered Areas)")
             fig_d, ax_d = plt.subplots()
+            # Use the most recent year's boundary for the backdrop
             annual_maps[max(years)].boundary.plot(ax=ax_d, color='black', linewidth=0.5)
             deserts.plot(ax=ax_d, color='#ff4b4b', alpha=0.7)
             ax_d.set_axis_off()
             st.pyplot(fig_d)
         with col_list:
             st.subheader("Underserved LGAs")
-            st.write(pd.DataFrame(deserts['NAME_2'].unique(), columns=["LGA Priority List"]))
+            # Extract unique LGA names from the desert intersection
+            desert_lgas = deserts['NAME_2'].unique() if 'NAME_2' in deserts.columns else ["None detected"]
+            st.write(pd.DataFrame(desert_lgas, columns=["LGA Priority List"]))
+            st.info("**Strategic Note:** Red areas represent population zones outside the 60-minute travel threshold. Priority should be given to constructing Primary Health Centers in these gaps.")
     else:
+        # Display the specific error message from the engine
         st.error(f"Analysis Error: {results[4]}")
