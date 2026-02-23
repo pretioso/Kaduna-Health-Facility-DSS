@@ -82,7 +82,7 @@ with st.sidebar:
     roads = st.file_uploader("Roads (gpkg)", type=['gpkg'])
     pops = st.file_uploader("Population (tif)", type=['tif'])
     
-    if st.button("🚀 GENERATE DECISION MATRIX", use_container_width=True):
+    if st.button("GENERATE DECISION MATRIX", use_container_width=True):
         if all([outs, facs, lgas, roads, pops]):
             st.session_state.analyzed = True
         else:
@@ -161,11 +161,12 @@ else:
                 # SECTION 4: ROADMAP
                 st.header("4. Infrastructure & Intervention Priority Roadmap")
                 st.markdown("""
-                * **Kajuru & Kaduna North**: Exceptional demand growth - require facility expansion.
+                * **Kajuru & Kaduna North**: Exceptional demand growth, require expansion for existing facilities.
                 * **Birnin Gwari & Kachia**: Focus construction within the identified Healthcare Deserts.
-                * **Giwa & Lere**: Scale staffing to match consistent outpatient growth.
+                * **Giwa & Lere**: Scale-up staffing to match consistent outpatient growth.
+                * ** Sanga**: Construction of more healthcare facilities to cater for the growing population of the LGA.
                 """)
-                st.caption("References: [1] Anselin, L. (1995) 'LISA'. [2] Kaduna State MOH Plan 2021-2030.")
+                
             else:
                 st.error(f"Analysis Error: {res[6]}")
         else:
