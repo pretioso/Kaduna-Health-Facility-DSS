@@ -9,65 +9,64 @@ Original file is located at
 
 import streamlit as st
 import geopandas as gpd
-import pandas as pd
-import base64
 import matplotlib.pyplot as plt
+import seaborn as sns
 from engine_layer_py import run_analysis
 
-# 1. Background CSS (Top-center fix)
-def set_bg(bin_file):
-    with open(bin_file, 'rb') as f:
-        bin_str = base64.b64encode(f.read()).decode()
-    st.markdown(f'''<style>.stApp {{background-image: url("data:image/png;base64,{bin_str}"); background-size: cover; background-position: top center; background-attachment: fixed;}} .main {{background-color: rgba(255,255,255,0.9); padding: 25px; border-radius: 15px;}}</style>''', unsafe_allow_html=True)
+st.set_page_config(layout="wide")
+st.title("KADUNA STATE STRATEGIC HEALTH INTELLIGENCE")
 
-try: set_bg('background.png')
-except: pass
-
-st.title("KADUNA HEALTH STRATEGIC DSS")
-
-# 2. Sidebar Uploads
+# --- SIDEBAR ---
 with st.sidebar:
-    st.header("Strategic Input")
-    out_files = st.file_uploader("Outpatient Data", accept_multiple_files=True)
-    fac_file = st.file_uploader("Facilities (Zip)", type=['zip'])
-    lga_file = st.file_uploader("Boundaries (Zip)", type=['zip'])
-    road_file = st.file_uploader("Road Network (gpkg)", type=['gpkg'])
-    pop_file = st.file_uploader("Population (tif)", type=['tif'])
-    run_btn = st.button("Generate Priority Analysis")
+    st.header("Upload Repository")
+    outs = st.file_uploader("Outpatient Data", accept_multiple_files=True)
+    facs = st.file_uploader("Facilities (Zip)", type=['zip'])
+    lgas = st.file_uploader("Boundaries (Zip)", type=['zip'])
+    roads = st.file_uploader("Roads (gpkg)", type=['gpkg'])
+    pops = st.file_uploader("Population (tif)", type=['tif'])
+    process = st.button("Generate Stakeholder Report")
 
-# 3. Execution and Result Display
-if run_btn and all([out_files, fac_file, lga_file, road_file, pop_file]):
-    with st.spinner("Calculating Health Utilization Rates..."):
-        spatial_data, moran_report, msg = run_analysis(gpd.read_file(fac_file), gpd.read_file(road_file), gpd.read_file(lga_file), out_files, pop_file)
-    
-    if spatial_data is not None:
-        # MAP OUTPUTS
-        st.header("I. Spatial Utilization Heatmaps")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("Outpatient Rate (per 1,000)")
-            fig, ax = plt.subplots()
-            spatial_data.plot(column='Rate_Per_1000', cmap='RdYlGn', legend=True, ax=ax)
-            st.pyplot(fig)
-        with col2:
-            st.subheader("Population Distribution")
-            fig2, ax2 = plt.subplots()
-            spatial_data.plot(column='Population', cmap='Purples', legend=True, ax=ax2)
-            st.pyplot(fig2)
+if process and all([outs, facs, lgas, roads, pops]):
+    annual_maps, deserts, underserved_lgas, seasonal_summary, mi = run_analysis(
+        gpd.read_file(facs), gpd.read_file(roads), gpd.read_file(lgas), outs, pops
+    )
 
-        # TABULAR OUTPUTS
-        st.header("II. LGA Priority & Infrastructure Table")
-        priority_df = spatial_data[['NAME_2', 'Rate_Per_1000', 'Min_Distance_Apart', 'Recommended_Infrastructure']].sort_values('Rate_Per_1000')
-        st.dataframe(priority_df.style.background_gradient(cmap='Reds_r', subset=['Rate_Per_1000']), use_container_width=True)
+    if annual_maps:
+        # SECTION 1: TEMPORAL DISTRIBUTION (By LGA)
+        st.header("I. Temporal Outpatient Distribution (Annual per 10k Population)")
+        cols = st.columns(len(annual_maps))
+        for i, (yr, data) in enumerate(annual_maps.items()):
+            with cols[i]:
+                st.subheader(f"Year: {yr}")
+                fig, ax = plt.subplots()
+                data.plot(column='Rate_Per_10k', cmap='YlOrRd', legend=True, ax=ax)
+                ax.set_axis_off()
+                st.pyplot(fig)
 
-        st.header("III. Moran's I Spatial Report")
-        st.table(moran_report)
+        # SECTION 2: DESERTS & UNDERSERVED
+        st.header("II. Healthcare Deserts & Underserved LGAs")
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            fig_d, ax_d = plt.subplots()
+            annual_maps[max(annual_maps.keys())].boundary.plot(ax=ax_d, color='black', linewidth=0.5)
+            deserts.plot(ax=ax_d, color='red', alpha=0.7)
+            st.pyplot(fig_d)
+        with c2:
+            st.write("**Underserved LGAs (Critical Gaps):**")
+            st.dataframe(pd.DataFrame(underserved_lgas, columns=["LGA Name"]), use_container_width=True)
+
+        # SECTION 3: SEASONALITY
+        st.header("III. Seasonal Surge Analysis")
+        fig_s, ax_s = plt.subplots(figsize=(8, 3))
+        sns.barplot(data=seasonal_summary, x='Season', y='Count', palette='viridis', ax=ax_s)
+        st.pyplot(fig_s)
+
+        # SECTION 4: MORAN'S I (Clarity Fix)
+        st.header("IV. Spatial Inequality Report (Moran's I)")
+        m_col1, m_col2 = st.columns(2)
+        m_col1.metric("Moran's I Index", round(mi.I, 4))
+        m_col1.metric("P-Value", round(mi.p_sim, 4))
         
-        # Implication Logic
-        res_text = moran_report.iloc[3]['Value']
-        if "Clustered" in res_text:
-            st.warning("**STRATEGIC IMPLICATION:** Significant clustering detected. This indicates that health facility usage is not equitable across the state. Priority LGAs (Red in table) are underserved 'Cold Spots' that require immediate facility upgrading.")
-        else:
-            st.info("**STRATEGIC IMPLICATION:** Usage patterns appear random. Infrastructure distribution is currently meeting the population's geographic needs without systematic bias.")
-    else:
-        st.error(f"Error: {msg}")
+        implication = "Clustered (Inequitable)" if mi.I > 0 and mi.p_sim < 0.05 else "Random"
+        m_col2.success(f"**Conclusion:** {implication}")
+        m_col2.write("**Stakeholder Implication:** Significant clustering means healthcare access is determined by location, not need. Targeted investment is required in the Red zones.")
