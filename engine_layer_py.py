@@ -19,7 +19,7 @@ from esda.moran import Moran
 
 def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
     try:
-        # 1. Spatial Prep & Population
+        # 1. Spatial Alignment & Population
         lga_boundary = lga_boundary.to_crs(epsg=4326)
         with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
             tmp.write(population_tif.read())
@@ -28,17 +28,15 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
         lga_boundary["Population"] = [max(s["sum"], 1) if s and s["sum"] else 5000 for s in stats]
         os.unlink(tmp_path)
         
-        # 2. Name Standardization
         def clean_name(name): return re.sub(r'[^A-Z0-9]', '', str(name).upper())
         lga_boundary["MATCH_KEY"] = lga_boundary["NAME_2"].apply(clean_name)
 
-        # 3. Multi-Year Processing (2019-2024)
+        # 2. Number 1: Multi-Year Processing (2019-2024)
         all_data = []
         for file in outpatient_files:
             df = pd.read_excel(file)
-            if 'Year' not in df.columns:
-                match = re.search(r'(\d{4})', file.name)
-                df['Year'] = int(match.group(1)) if match else 2024
+            match = re.search(r'(\d{4})', file.name)
+            df['Year'] = int(match.group(1)) if match else 2024
             df["LGA_CLEAN"] = df["LGA"].astype(str).str.replace(r'^KD\s+', '', regex=True, case=False).apply(clean_name)
             all_data.append(df)
         
@@ -46,35 +44,30 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
         month_cols = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
         
         annual_results = {}
-        for yr in sorted(raw_df['Year'].unique()):
+        for yr in [2019, 2020, 2021, 2022, 2023, 2024]:
             yr_df = raw_df[raw_df['Year'] == yr].copy()
-            yr_df['Total'] = yr_df[month_cols].sum(axis=1)
-            agg = yr_df.groupby('LGA_CLEAN')['Total'].sum().reset_index()
-            merged = lga_boundary.merge(agg, left_on="MATCH_KEY", right_on="LGA_CLEAN", how="left").fillna(0)
-            merged[f'Rate_{yr}'] = (merged['Total'] / merged['Population']) * 1000
-            merged[f'Rate_{yr}'] += np.random.normal(0, 1e-9, len(merged))
-            annual_results[yr] = merged
+            if not yr_df.empty:
+                yr_df['Total'] = yr_df[month_cols].sum(axis=1)
+                agg = yr_df.groupby('LGA_CLEAN')['Total'].sum().reset_index()
+                merged = lga_boundary.merge(agg, left_on="MATCH_KEY", right_on="LGA_CLEAN", how="left").fillna(0)
+                merged[f'Rate_{yr}'] = (merged['Total'] / merged['Population']) * 1000
+                annual_results[yr] = merged
 
-        # 4. Moran's I
-        latest_yr = max(annual_results.keys())
+        # Moran's I (2024)
+        latest_yr = 2024 if 2024 in annual_results else max(annual_results.keys())
         w = lp.weights.Queen.from_dataframe(annual_results[latest_yr])
         w.transform = 'R'
         mi = Moran(annual_results[latest_yr][f'Rate_{latest_yr}'], w)
 
-        # 5. Isochrone/Desert Logic (Simulation of 30/60 min travel)
+        # 3. Number 2: Accessibility Logic
         fac_metric = facilities_df.to_crs(epsg=32632)
-        lga_metric = lga_boundary.to_crs(epsg=32632)
+        iso_30 = fac_metric.buffer(15000).union_all() # 30 min approx
+        iso_60 = fac_metric.buffer(30000).union_all() # 60 min approx
         
-        # Creating buffers for 30min (approx 15km) and 60min (approx 30km) for the visual
-        iso_30 = fac_metric.buffer(15000).union_all()
-        iso_60 = fac_metric.buffer(30000).union_all()
+        iso_gdf_30 = gpd.GeoDataFrame(geometry=[iso_30], crs=32632).to_crs(epsg=4326)
+        iso_gdf_60 = gpd.GeoDataFrame(geometry=[iso_60], crs=32632).to_crs(epsg=4326)
+        deserts = gpd.overlay(lga_boundary, iso_gdf_60, how='difference')
         
-        isochrones_30 = gpd.GeoDataFrame(geometry=[iso_30], crs=32632).to_crs(epsg=4326)
-        isochrones_60 = gpd.GeoDataFrame(geometry=[iso_60], crs=32632).to_crs(epsg=4326)
-        
-        # Deserts are areas in LGA not covered by 60 min
-        healthcare_deserts = gpd.overlay(lga_boundary, isochrones_60, how='difference')
-        
-        return annual_results, mi, healthcare_deserts, isochrones_30, isochrones_60, lga_boundary
+        return annual_results, mi, deserts, iso_gdf_30, iso_gdf_60, lga_boundary, roads_df
     except Exception as e:
-        return None, None, None, None, None, str(e)
+        return None, None, None, None, None, None, str(e)
