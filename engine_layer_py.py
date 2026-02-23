@@ -12,9 +12,6 @@ import geopandas as gpd
 import pandas as pd
 import numpy as np
 import re
-import networkx as nx
-from shapely.geometry import Point, MultiPoint
-from sklearn.neighbors import BallTree
 from rasterstats import zonal_stats
 import tempfile
 import os
@@ -23,59 +20,49 @@ import libpysal as lp
 
 def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
     try:
-        # --- DATA CLEANING (Cell 12 & 16) ---
+        # --- 1. POPULATION EXTRACTION (Notebook Cell 3, 37) ---
+        with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
+            tmp.write(population_tif.read())
+            tmp_path = tmp.name
+        
+        stats = zonal_stats(lga_boundary, tmp_path, stats=["sum"])
+        lga_boundary["Population"] = [s["sum"] if s and s["sum"] else 1 for s in stats]
+        os.unlink(tmp_path)
+
+        # --- 2. OUTPATIENT CLEANING (Notebook Cell 12, 46) ---
         all_data = []
         for file in outpatient_files:
             df = pd.read_excel(file)
             if 'Year' not in df.columns:
                 match = re.search(r'(\d{4})', file.name)
                 df['Year'] = int(match.group(1)) if match else 2024
+            df["LGA"] = df["LGA"].str.replace("^kd\s+", "", regex=True).str.strip().str.upper()
             all_data.append(df)
         
-        merged_data = pd.concat(all_data, ignore_index=True)
-        merged_data["LGA"] = merged_data["LGA"].str.replace("^kd\s+", "", regex=True).str.replace("Kaduna State", "State Total", regex=False).str.strip().str.upper()
+        merged_df = pd.concat(all_data, ignore_index=True)
+        st.session_state['long_data'] = merged_df # Store for trends
         
-        # Melt and Map Months (Cell 9-16)
-        month_map = {"January":"Jan", "February":"Feb", "March":"Mar", "April":"Apr", "May":"May", "June":"Jun",
-                     "July":"Jul", "August":"Aug", "September":"Sep", "October":"Oct", "November":"Nov", "December":"Dec"}
-        month_cols = [c for c in merged_data.columns if c in month_map.keys()]
-        long_data = merged_data.melt(id_vars=["LGA", "Year"], value_vars=month_cols, var_name='Month', value_name='Outpatient_Count')
-        long_data["Month"] = long_data["Month"].map(month_map)
-        st.session_state['long_data'] = long_data
+        # Calculate Rates for latest year
+        latest = merged_df[merged_df['Year'] == merged_df['Year'].max()]
+        # Sum all month columns
+        val_cols = [c for c in latest.columns if c not in ['LGA', 'Year']]
+        latest['Total'] = latest[val_cols].sum(axis=1)
+        
+        # --- 3. SPATIAL JOIN & MORAN'S I (Notebook Cell 61, 87) ---
+        lga_boundary["NAME_2_UP"] = lga_boundary["NAME_2"].str.upper()
+        spatial_data = lga_boundary.merge(latest[['LGA', 'Total']], left_on='NAME_2_UP', right_on='LGA', how='left')
+        spatial_data['Rate'] = (spatial_data['Total'] / spatial_data['Population']) * 1000
+        
+        # Moran's I
+        w = lp.weights.Queen.from_dataframe(spatial_data.fillna(0))
+        st.session_state['moran'] = Moran(spatial_data['Rate'].fillna(0), w)
 
-        # --- POPULATION & RATES (Cell 3, 37, 46) ---
-        with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp_raster:
-            tmp_raster.write(population_tif.read())
-            raster_path = tmp_raster.name
-        
-        stats = zonal_stats(lga_boundary, raster_path, stats=["sum"], nodata=-9999)
-        lga_boundary["Population"] = [s["sum"] if s["sum"] else 0 for s in stats]
-        os.unlink(raster_path)
-        
-        # Calculate Rates
-        latest_year = merged_data['Year'].max()
-        yearly_agg = merged_data[merged_data['Year'] == latest_year].groupby('LGA')['Outpatient_Count'].sum().reset_index()
-        spatial_data = lga_boundary.copy()
-        spatial_data['NAME_2_UP'] = spatial_data['NAME_2'].str.upper()
-        spatial_data = spatial_data.merge(yearly_agg, left_on='NAME_2_UP', right_on='LGA', how='left')
-        spatial_data['Attendance_Rate'] = (spatial_data['Outpatient_Count'] / spatial_data['Population']) * 1000
-
-        # --- ISOCHRONES & DESERTS (Cell 135) ---
-        # 60-min coverage at 30km/h
-        roads_metric = roads_df.to_crs(epsg=32632)
-        facilities_metric = facilities_df.to_crs(epsg=32632)
-        roads_metric['travel_time_min'] = (roads_metric.geometry.length / 1000 / 30) * 60
-        
-        # Simple buffer approximation for speed, or full ego-graph if needed
-        coverage = facilities_metric.buffer(30000).union_all() # 30km ~ 60min at 30km/h
+        # --- 4. DESERTS (Notebook Cell 135) ---
+        fac_metric = facilities_df.to_crs(epsg=32632)
+        coverage = fac_metric.buffer(30000).union_all() # 30km coverage
         deserts = gpd.overlay(lga_boundary.to_crs(epsg=32632), gpd.GeoDataFrame(geometry=[coverage], crs=32632), how='difference')
 
-        # --- MORAN'S I (Cell 61) ---
-        w = lp.weights.Queen.from_dataframe(spatial_data.fillna(0))
-        w.transform = 'R'
-        mi = Moran(spatial_data['Attendance_Rate'].fillna(0), w)
-        st.session_state['moran_result'] = mi
-
-        return deserts, spatial_data, "Spatio-temporal analysis complete."
+        return deserts, spatial_data, "Analysis Complete"
     except Exception as e:
-        return None, None, f"Engine Error: {str(e)}"
+        st.error(f"Engine Failure: {e}")
+        return None, None, str(e)
