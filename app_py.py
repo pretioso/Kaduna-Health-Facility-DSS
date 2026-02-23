@@ -102,7 +102,3 @@ if run and all([outs, facs, lgas, roads, pops]):
 
     else:
         st.error(f"Execution Error: {results[5]}")
-
-# --- REFERENCES ---
-st.markdown("---")
-st.caption("References: [1] Anselin, L. (1995) 'Local Indicators of Spatial Association'. [2] Kaduna State Ministry of Health Development Plan 2021-2030. [3] World Bank Population Estimates.")
