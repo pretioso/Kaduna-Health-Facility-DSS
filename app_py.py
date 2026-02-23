@@ -22,7 +22,7 @@ def set_bg(bin_file):
 
 set_bg('background.png')
 
-st.title("KADUNA HEALTH DSS")
+st.title("KADUNA STATE HEALTH DECISION SUPPORT SYSTEM")
 
 # Sidebar Uploads
 outpatient_files = st.sidebar.file_uploader("Outpatient Data", accept_multiple_files=True)
