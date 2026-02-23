@@ -14,91 +14,82 @@ import matplotlib.pyplot as plt
 import base64
 from engine_layer_py import run_analysis
 
-# --- CONFIG & STYLING ---
 st.set_page_config(layout="wide", page_title="Kaduna Health DSS")
 
+# --- BACKGROUND & STYLING ---
 def set_bg(bin_file):
     try:
         with open(bin_file, 'rb') as f:
             data = f.read()
         bin_str = base64.b64encode(data).decode()
-        st.markdown(f'''<style>.stApp {{background-image: url("data:image/png;base64,{bin_str}"); background-size: cover; background-position: top center; background-attachment: fixed;}} .main {{background-color: rgba(255, 255, 255, 0.95); padding: 35px; border-radius: 20px; box-shadow: 0 10px 25px rgba(0,0,0,0.2);}} h1, h2 {{color: #0c343d; font-weight: 800;}}</style>''', unsafe_allow_html=True)
+        st.markdown(f'''<style>.stApp {{background-image: url("data:image/png;base64,{bin_str}"); background-size: cover;}} .main {{background-color: rgba(255, 255, 255, 0.95); padding: 30px; border-radius: 15px;}}</style>''', unsafe_allow_html=True)
     except: pass
 
 set_bg('background.png')
 
 st.title("KADUNA STATE STRATEGIC HEALTH INTELLIGENCE")
-st.markdown("---")
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("Research Repository")
-    outs = st.file_uploader("Outpatient Excel Data", accept_multiple_files=True)
-    facs = st.file_uploader("Health Facilities (Zip)", type=['zip'])
-    lgas = st.file_uploader("LGA Boundaries (Zip)", type=['zip'])
-    roads = st.file_uploader("Road Network (gpkg)", type=['gpkg'])
-    pops = st.file_uploader("Population Raster (tif)", type=['tif'])
-    run = st.button("EXECUTE STAKEHOLDER ANALYSIS")
-
-# --- DASHBOARD LAYOUT ---
-if run and all([outs, facs, lgas, roads, pops]):
-    results = run_analysis(gpd.read_file(facs), gpd.read_file(roads), gpd.read_file(lgas), outs, pops)
+    st.header("Upload Repository")
+    outs = st.file_uploader("Outpatient Data", accept_multiple_files=True)
+    facs = st.file_uploader("Facilities (Zip)", type=['zip'])
+    lgas = st.file_uploader("Boundaries (Zip)", type=['zip'])
+    roads = st.file_uploader("Roads (gpkg)", type=['gpkg'])
+    pops = st.file_uploader("Population (tif)", type=['tif'])
+    run = st.button("RUN REPORT")
     
-    if results[0] is not None:
-        annual_maps, seasonal_table, mi, deserts, pop_map, priority_list = results
-        
-        # I. SPATIAL AUTOCORRELATION
-        st.header("1. Spatial Characterization (Global Moran’s I)")
-        m_col1, m_col2 = st.columns([1, 2])
-        with m_col1:
-            st.metric("Moran's I Index", round(mi.I, 4))
-            st.metric("P-Value", round(mi.p_sim, 4))
-        with m_col2:
-            st.success(f"**Result:** {'Spatial Dispersed' if mi.I < 0 else 'Spatial Clustered'}")
-            st.info("**Implication:** Negative autocorrelation (-0.25) indicates that LGAs with high outpatient rates are surrounded by LGAs with low rates—suggesting localized 'magnets' of healthcare rather than a uniform state-wide system.")
+    # REFERENCES (Moved to Sidebar bottom)
+    st.markdown("---")
+    with st.expander("Technical References"):
+        st.caption("Anselin, L. (1995) 'LISA'")
+        st.caption("Kaduna State MOH Strategic Plan")
 
-        # II. GRADUATED INTENSITY MAPS
-        st.header("2. Annual Intensity of Outpatient Attendance (Graduated per 1000)")
+if run and all([outs, facs, lgas, roads, pops]):
+    res = run_analysis(gpd.read_file(facs), gpd.read_file(roads), gpd.read_file(lgas), outs, pops)
+    
+    if res[0] is not None:
+        annual_maps, seasonal_table, mi, deserts, pop_map = res
+        
+        # 1. MORAN'S I
+        st.header("1. Global Moran’s I Summary")
+        st.table(pd.DataFrame({"Variable": ["2024 Outpatient Rate"], "Moran’s Index": [mi.I], "Z-score": [mi.z_sim], "P-value": [mi.p_sim]}))
+
+        # 2. GRADUATED MAPS (Fixed the Crash)
+        st.header("2. Annual Outpatient Intensity (Rate per 1000)")
         years = sorted(annual_maps.keys())
         cols = st.columns(3)
         for i, yr in enumerate(years):
             with cols[i % 3]:
-                fig, ax = plt.subplots(figsize=(6, 6))
-                annual_maps[yr].plot(column=f'Rate_{yr}', cmap='YlGnBu', scheme='FisherJenks', k=5, legend=True, 
-                                    legend_kwds={'loc': 'lower right', 'fmt': "{:.1f}"}, ax=ax)
-                ax.set_title(f"Year {yr} Attendance Intensity", fontsize=10, fontweight='bold')
+                fig, ax = plt.subplots()
+                # Use Quantiles to avoid the Fisher-Jenks "Unique Value" error
+                try:
+                    annual_maps[yr].plot(column=f'Rate_{yr}', cmap='YlOrRd', scheme='Quantiles', k=5, legend=True, ax=ax)
+                except:
+                    annual_maps[yr].plot(column=f'Rate_{yr}', cmap='YlOrRd', legend=True, ax=ax)
+                ax.set_title(f"Year {yr}")
                 ax.set_axis_off()
                 st.pyplot(fig)
 
-        # III. POPULATION VS DESERTS
-        st.header("3. Healthcare Access & Population Pressure")
-        col_pop, col_des = st.columns(2)
-        with col_pop:
-            st.subheader("Population Density by LGA")
-            fig_p, ax_p = plt.subplots()
-            pop_map.plot(column='Population', cmap='Purples', scheme='NaturalBreaks', legend=True, ax=ax_p)
-            ax_p.set_axis_off()
-            st.pyplot(fig_p)
-        with col_des:
-            st.subheader("Healthcare Deserts (Gaps >30km)")
+        # 3. DESERTS & UNDERSERVED
+        st.header("3. Healthcare Deserts & Strategic Need")
+        c1, c2 = st.columns([2, 1])
+        with c1:
             fig_d, ax_d = plt.subplots()
-            annual_maps[max(years)].boundary.plot(ax=ax_d, color='#CCCCCC', linewidth=0.5)
-            deserts.plot(ax=ax_d, color='#D90429', alpha=0.8)
+            annual_maps[max(years)].boundary.plot(ax=ax_d, color='black')
+            deserts.plot(ax=ax_d, color='red', alpha=0.7)
             ax_d.set_axis_off()
             st.pyplot(fig_d)
+        with c2:
+            st.subheader("Underserved LGAs")
+            st.write(pd.DataFrame(deserts['NAME_2'].unique(), columns=["LGA Priority List"]))
 
-        # IV. SEASONAL & INTERVENTION TABLES
-        st.header("4. Stakeholder Intervention Roadmap")
-        tab1, tab2 = st.tabs(["LGA Priority Ranking", "Seasonal Surge Planning"])
-        
-        with tab1:
-            st.write("**Top LGAs for New Facility Construction (By Uncovered Land Area):**")
-            st.dataframe(priority_list.style.background_gradient(cmap='Reds'), use_container_width=True)
-            st.warning("**Intervention Need:** High-intensity (dark blue) LGAs in the maps indicate over-burdened facilities. Red zones in the desert map indicate where new primary health centers are physically absent.")
-            
-        with tab2:
-            st.write("**Seasonal Peak Rates per LGA:**")
-            st.dataframe(seasonal_table.style.highlight_max(axis=1, color='#90ee90'), use_container_width=True)
+        # 4. POPULATION
+        st.header("4. Population Density")
+        fig_p, ax_p = plt.subplots(figsize=(10, 4))
+        pop_map.plot(column='Population', cmap='Blues', scheme='NaturalBreaks', legend=True, ax=ax_p)
+        ax_p.set_axis_off()
+        st.pyplot(fig_p)
 
     else:
-        st.error(f"Execution Error: {results[5]}")
+        st.error(f"Error: {res[4]}")
