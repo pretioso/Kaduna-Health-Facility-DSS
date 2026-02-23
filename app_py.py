@@ -14,58 +14,60 @@ import base64
 import matplotlib.pyplot as plt
 from engine_layer_py import run_analysis
 
-# Background setup
+# 1. Background CSS (Top-center fix)
 def set_bg(bin_file):
     with open(bin_file, 'rb') as f:
         bin_str = base64.b64encode(f.read()).decode()
-    st.markdown(f'''<style>.stApp {{background-image: url("data:image/png;base64,{bin_str}"); background-size: cover; background-position: top center; background-attachment: fixed;}} .main {{background-color: rgba(255,255,255,0.92); padding: 25px; border-radius: 15px;}}</style>''', unsafe_allow_html=True)
+    st.markdown(f'''<style>.stApp {{background-image: url("data:image/png;base64,{bin_str}"); background-size: cover; background-position: top center; background-attachment: fixed;}} .main {{background-color: rgba(255,255,255,0.9); padding: 25px; border-radius: 15px;}}</style>''', unsafe_allow_html=True)
 
 try: set_bg('background.png')
 except: pass
 
 st.title("KADUNA HEALTH STRATEGIC DSS")
 
-# Sidebar Uploads
+# 2. Sidebar Uploads
 with st.sidebar:
-    st.header("Input Control")
+    st.header("Strategic Input")
     out_files = st.file_uploader("Outpatient Data", accept_multiple_files=True)
     fac_file = st.file_uploader("Facilities (Zip)", type=['zip'])
-    lga_file = st.file_uploader("LGA Boundary (Zip)", type=['zip'])
+    lga_file = st.file_uploader("Boundaries (Zip)", type=['zip'])
     road_file = st.file_uploader("Road Network (gpkg)", type=['gpkg'])
-    pop_file = st.file_uploader("Population Raster (tif)", type=['tif'])
-    run_btn = st.button("Generate Strategic Map & Tables")
+    pop_file = st.file_uploader("Population (tif)", type=['tif'])
+    run_btn = st.button("Generate Priority Analysis")
 
+# 3. Execution and Result Display
 if run_btn and all([out_files, fac_file, lga_file, road_file, pop_file]):
-    spatial_data, moran_table, msg = run_analysis(gpd.read_file(fac_file), gpd.read_file(road_file), gpd.read_file(lga_file), out_files, pop_file)
+    with st.spinner("Calculating Health Utilization Rates..."):
+        spatial_data, moran_report, msg = run_analysis(gpd.read_file(fac_file), gpd.read_file(road_file), gpd.read_file(lga_file), out_files, pop_file)
     
     if spatial_data is not None:
-        # --- SECTION 1: MAPS ---
-        st.header("I. Visual Spatial Patterns")
+        # MAP OUTPUTS
+        st.header("I. Spatial Utilization Heatmaps")
         col1, col2 = st.columns(2)
         with col1:
-            st.subheader("Outpatient Rate Heatmap")
+            st.subheader("Outpatient Rate (per 1,000)")
             fig, ax = plt.subplots()
-            spatial_data.plot(column='Rate_Per_1000', cmap='RdYlGn_r', legend=True, ax=ax)
+            spatial_data.plot(column='Rate_Per_1000', cmap='RdYlGn', legend=True, ax=ax)
             st.pyplot(fig)
         with col2:
-            st.subheader("Population Density Context")
+            st.subheader("Population Distribution")
             fig2, ax2 = plt.subplots()
-            spatial_data.plot(column='Population', cmap='Blues', legend=True, ax=ax2)
+            spatial_data.plot(column='Population', cmap='Purples', legend=True, ax=ax2)
             st.pyplot(fig2)
 
-        # --- SECTION 2: PRIORITY TABLE ---
-        st.header("II. Strategic Priority & Infrastructure Gap")
-        priority_table = spatial_data[['NAME_2', 'Rate_Per_1000', 'Suggested_Distance_Apart', 'Recommended_Infrastructure']].sort_values('Rate_Per_1000')
-        st.dataframe(priority_table.style.background_gradient(cmap='Reds', subset=['Rate_Per_1000']), use_container_width=True)
+        # TABULAR OUTPUTS
+        st.header("II. LGA Priority & Infrastructure Table")
+        priority_df = spatial_data[['NAME_2', 'Rate_Per_1000', 'Min_Distance_Apart', 'Recommended_Infrastructure']].sort_values('Rate_Per_1000')
+        st.dataframe(priority_df.style.background_gradient(cmap='Reds_r', subset=['Rate_Per_1000']), use_container_width=True)
 
-        # --- SECTION 3: MORAN'S I REPORT ---
-        st.header("III. Spatial Autocorrelation (Moran's I)")
-        st.table(moran_table)
+        st.header("III. Moran's I Spatial Report")
+        st.table(moran_report)
         
-        res_val = moran_table.iloc[3]['Value']
-        if "Clustered" in res_val:
-            st.warning("⚠️ **IMPLICATION:** Significant health inequalities exist. High outpatient rates are clustering in specific zones, while 'Cold Spots' (low-rate clusters) lack essential infrastructure. Targeted intervention is required in Priority 1 LGAs.")
+        # Implication Logic
+        res_text = moran_report.iloc[3]['Value']
+        if "Clustered" in res_text:
+            st.warning("**STRATEGIC IMPLICATION:** Significant clustering detected. This indicates that health facility usage is not equitable across the state. Priority LGAs (Red in table) are underserved 'Cold Spots' that require immediate facility upgrading.")
         else:
-            st.info("ℹ️ **IMPLICATION:** Health service utilization is randomly distributed. Current facility locations do not show a systematic geographic bias.")
+            st.info("**STRATEGIC IMPLICATION:** Usage patterns appear random. Infrastructure distribution is currently meeting the population's geographic needs without systematic bias.")
     else:
-        st.error(f"Analysis Failed: {msg}")
+        st.error(f"Error: {msg}")
