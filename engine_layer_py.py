@@ -20,18 +20,20 @@ from esda.moran import Moran
 
 def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
     try:
-        # --- 1. POPULATION & NAME CLEANING ---
+        # --- 1. POPULATION EXTRACTION ---
         with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
             tmp.write(population_tif.read())
             tmp_path = tmp.name
         
         stats = zonal_stats(lga_boundary, tmp_path, stats=["sum"])
+        # Ensure 'NAME_2' exists; if not, use the first string column found
+        lga_col = 'NAME_2' if 'NAME_2' in lga_boundary.columns else lga_boundary.select_dtypes(include=['object']).columns[0]
         lga_boundary["Population"] = [s["sum"] if s and s["sum"] else 1 for s in stats]
         os.unlink(tmp_path)
         
-        lga_boundary["NAME_2_UP"] = lga_boundary["NAME_2"].str.strip().str.upper()
+        lga_boundary["NAME_2_UP"] = lga_boundary[lga_col].str.strip().str.upper()
 
-        # --- 2. DATA MERGING & RATE PER 1000 ---
+        # --- 2. DATA MERGING ---
         all_data = []
         for file in outpatient_files:
             df = pd.read_excel(file)
@@ -42,10 +44,11 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
             all_data.append(df)
         
         raw_df = pd.concat(all_data, ignore_index=True)
-        month_cols = ["January", "February", "March", "April", "May", "June", 
-                      "July", "August", "September", "October", "November", "December"]
         
-        # Calculate Annual Rates for Maps
+        # Flexibly find month columns (handles Jan or January)
+        all_cols = raw_df.columns.tolist()
+        month_cols = [c for c in all_cols if c.startswith(('Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'))]
+        
         annual_maps = {}
         for yr in sorted(raw_df['Year'].unique()):
             yr_df = raw_df[raw_df['Year'] == yr].copy()
@@ -61,8 +64,9 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
         long_df['Rate'] = (long_df['Count'] / long_df['Population']) * 1000
         
         def get_season(m):
-            if m in ["November", "December", "January", "February"]: return "Harmattan"
-            if m in ["March", "April"]: return "Hot-Dry"
+            m = m.lower()
+            if any(x in m for x in ["nov", "dec", "jan", "feb"]): return "Harmattan"
+            if any(x in m for x in ["mar", "apr"]): return "Hot-Dry"
             return "Rainy Season"
         
         long_df['Season'] = long_df['Month'].apply(get_season)
@@ -76,9 +80,9 @@ def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, popula
         w.transform = 'R'
         mi = Moran(latest_map[f'Rate_{latest_year}'], w)
 
-        # --- 5. DESERTS & INFRASTRUCTURE ---
+        # --- 5. DESERTS ---
         facilities_metric = facilities_df.to_crs(epsg=32632)
-        coverage = facilities_metric.buffer(30000).union_all() # 30km coverage
+        coverage = facilities_metric.buffer(30000).union_all()
         deserts = gpd.overlay(lga_boundary.to_crs(epsg=32632), gpd.GeoDataFrame(geometry=[coverage], crs=32632), how='difference')
         
         return annual_maps, seasonal_table, mi, deserts, lga_boundary
