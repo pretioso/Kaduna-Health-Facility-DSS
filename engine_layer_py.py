@@ -10,66 +10,47 @@ Original file is located at
 import streamlit as st
 import geopandas as gpd
 import pandas as pd
-import numpy as np
 import re
 from esda.moran import Moran
 from libpysal.weights import Queen
 
-def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
+def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files):
     try:
-        st.write("🔍 Step 1: Loading and Cleaning Excel Data...")
+        # 1. Clean and Combine Excel Data
         all_data = []
-        files = outpatient_files if isinstance(outpatient_files, list) else [outpatient_files]
-        
-        for file in files:
-            engine = 'xlrd' if file.name.endswith('.xls') else 'openpyxl'
-            df = pd.read_excel(file, engine=engine)
-            
-            # Extract Year from filename if missing
+        for file in outpatient_files:
+            df = pd.read_excel(file)
             if 'Year' not in df.columns:
                 match = re.search(r'(\d{4})', file.name)
                 df['Year'] = int(match.group(1)) if match else 2024
             
-            # Notebook cleaning logic: remove 'kd ' prefix and force Uppercase
+            # Match notebook cleaning logic (force uppercase for joining)
             df["LGA"] = df["LGA"].astype(str).str.replace("^kd\s+", "", regex=True).str.strip().str.upper()
             all_data.append(df)
         
         raw_df = pd.concat(all_data, ignore_index=True)
         
-        # 2. Create Long Data for Trends (Temporal Analysis)
-        st.write("📈 Step 2: Generating Temporal Trends...")
+        # Store Long Data for Trend Chart
         month_cols = [c for c in raw_df.columns if c not in ["LGA", "Year"]]
-        long_data = raw_df.melt(id_vars=["LGA", "Year"], value_vars=month_cols, var_name='Month', value_name='Count')
-        st.session_state['long_data'] = long_data
+        st.session_state['long_data'] = raw_df.melt(id_vars=["LGA", "Year"], value_vars=month_cols, var_name='Month', value_name='Count')
 
-        # 3. Spatial Gap Analysis
-        st.write("🗺️ Step 3: Calculating 30km Healthcare Buffers...")
-        facilities_metric = facilities_df.to_crs(epsg=32632)
-        coverage_geom = facilities_metric.geometry.buffer(30000).union_all()
-        coverage_df = gpd.GeoDataFrame(geometry=[coverage_geom], crs=32632).to_crs(epsg=4326)
-        deserts = gpd.overlay(lga_boundary.to_crs(epsg=4326), coverage_df, how='difference')
-
-        # 4. Moran's I & Heatmap Prep (Spatial Autocorrelation)
-        st.write("📊 Step 4: Performing Hotspot Analysis (Moran's I)...")
+        # 2. Spatial Join for Heatmap
         latest_year = raw_df['Year'].max()
         yearly_agg = raw_df[raw_df['Year'] == latest_year].groupby('LGA').sum(numeric_only=True).sum(axis=1).reset_index()
         yearly_agg.columns = ['LGA', 'Total_Outpatient']
         
-        # Merge with Shapefile (Case-Insensitive)
+        # Merge with Boundary Shapefile
         name_col = 'NAME_2' if 'NAME_2' in lga_boundary.columns else lga_boundary.columns[0]
         lga_boundary[name_col] = lga_boundary[name_col].str.upper()
         spatial_data = lga_boundary.merge(yearly_agg, left_on=name_col, right_on='LGA')
-        
+
         if spatial_data.empty:
-            st.error(f"Merge Failed! Shapefile LGAs and Excel LGAs do not match. Check: {lga_boundary[name_col].iloc[0]} vs {yearly_agg['LGA'].iloc[0]}")
-            return None, None, "Data mismatch error."
+            return None, f"Error: No matches found between Excel LGAs and Shapefile. Sample: {yearly_agg['LGA'].iloc[0]}"
 
-        # Calculate Moran's I
+        # 3. Moran's I Calculation
         w = Queen.from_dataframe(spatial_data)
-        moran = Moran(spatial_data['Total_Outpatient'], w)
-        st.session_state['moran_result'] = moran
+        st.session_state['moran_result'] = Moran(spatial_data['Total_Outpatient'], w)
 
-        return deserts, spatial_data, "Success: Spatio-temporal analysis complete."
+        return spatial_data, "Analysis Successful"
     except Exception as e:
-        st.error(f"Critical Engine Error: {str(e)}")
-        return None, None, f"Error: {str(e)}"
+        return None, f"Analysis Error: {str(e)}"
