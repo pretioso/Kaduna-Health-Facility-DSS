@@ -14,86 +14,87 @@ import matplotlib.pyplot as plt
 import base64
 from engine_layer_py import run_analysis
 
-st.set_page_config(layout="wide", page_title="Kaduna Strategic Health Intel")
+st.set_page_config(layout="wide", page_title="Kaduna Health Decision Support")
 
-# --- BACKGROUND SETUP ---
+# --- VISUAL STYLING ---
 def set_bg(bin_file):
     try:
         with open(bin_file, 'rb') as f:
             data = f.read()
         bin_str = base64.b64encode(data).decode()
-        st.markdown(f'''<style>.stApp {{background-image: url("data:image/png;base64,{bin_str}"); background-size: cover;}} .main {{background-color: rgba(255, 255, 255, 0.98); padding: 30px; border-radius: 20px;}}</style>''', unsafe_allow_html=True)
+        st.markdown(f'''<style>.stApp {{background-image: url("data:image/png;base64,{bin_str}"); background-size: cover;}} .main {{background-color: rgba(255, 255, 255, 0.98); padding: 30px; border-radius: 15px; border: 1px solid #e0e0e0;}} h1, h2 {{color: #004d40;}}</style>''', unsafe_allow_html=True)
     except: pass
 
 set_bg('background.png')
 
 st.title("KADUNA STATE STRATEGIC HEALTH INTELLIGENCE")
-st.write("Outpatient Utilization & Spatial Accessibility Analysis")
+st.subheader("Implementation Portal for Health Sector Decision-Making")
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.header("Project Data Portal")
+    st.header("Control Panel")
     outs = st.file_uploader("Outpatient Data (Excel)", accept_multiple_files=True)
-    facs = st.file_uploader("Health Facilities (Zip)", type=['zip'])
+    facs = st.file_uploader("Facilities (Zip)", type=['zip'])
     lgas = st.file_uploader("LGA Boundaries (Zip)", type=['zip'])
     roads = st.file_uploader("Road Network (gpkg)", type=['gpkg'])
     pops = st.file_uploader("Population Raster (tif)", type=['tif'])
-    run = st.button("GENERATE DASHBOARD")
+    run = st.button("GENERATE STRATEGIC REPORT")
     
     st.markdown("---")
-    with st.expander("Technical References"):
-        st.caption("Anselin, L. (1995) 'LISA'")
+    with st.expander("References & Documentation"):
+        st.caption("Anselin, L. (1995) 'Local Indicators of Spatial Association'")
         st.caption("Kaduna State MOH Strategic Plan")
 
-# --- EXECUTION ---
+# --- DASHBOARD IMPLEMENTATION ---
 if run and all([outs, facs, lgas, roads, pops]):
-    with st.spinner("Analyzing spatial trends..."):
+    with st.spinner("Executing spatial intelligence algorithms..."):
         res = run_analysis(gpd.read_file(facs), gpd.read_file(roads), gpd.read_file(lgas), outs, pops)
     
     if res[0] is not None:
-        annual_maps, seasonal_table, mi, deserts, pop_map = res
+        annual_maps, mi, deserts, pop_map = res
         
-        # 1. MORAN'S I
-        st.header("1. Spatial Autocorrelation (Global Moran’s I)")
-        c1, c2 = st.columns(2)
-        c1.metric("Moran's I Index", round(mi.I, 4))
-        c2.info(f"The analysis confirms a **{'Spatial Dispersed' if mi.I < 0 else 'Spatial Clustered'}** pattern (p={round(mi.p_sim, 4)}).")
+        # 1. SPATIAL AUTOCORRELATION
+        st.header("1. Evidence-Based Spatial Distribution")
+        m1, m2 = st.columns(2)
+        if not pd.isna(mi.I):
+            m1.metric("Global Moran's I", round(mi.I, 4))
+            m2.success(f"Pattern Detected: {'Spatial Dispersion' if mi.I < 0 else 'Spatial Clustering'}")
+        else:
+            st.warning("Spatial weight matrix indicates zero variance. Check if all LGAs have data.")
 
-        # 2. GRADUATED INTENSITY MAPS
-        st.header("2. Outpatient Attendance Intensity (Rate per 1,000)")
+        # 2. ATTENDANCE INTENSITY
+        st.header("2. Outpatient Utilization Intensity (Rate per 1,000)")
         years = sorted(annual_maps.keys())
-        cols = st.columns(3)
+        cols = st.columns(len(years))
         for i, yr in enumerate(years):
-            with cols[i % 3]:
+            with cols[i]:
                 fig, ax = plt.subplots()
-                # Continuous color scale for stability
                 annual_maps[yr].plot(column=f'Rate_{yr}', cmap='YlGnBu', legend=True, ax=ax)
-                ax.set_title(f"Attendance Rate {yr}")
+                ax.set_title(f"Year {yr} Intensity", fontsize=10)
                 ax.set_axis_off()
                 st.pyplot(fig)
 
         # 3. POPULATION & DESERTS
-        st.header("3. Population Density & Healthcare Deserts")
-        col_p, col_d = st.columns(2)
-        with col_pop:
+        st.header("3. Strategic Resource Gaps (Healthcare Deserts)")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.write("**Population Pressure Map**")
             fig_p, ax_p = plt.subplots()
             pop_map.plot(column='Population', cmap='Purples', legend=True, ax=ax_p)
             ax_p.set_axis_off()
             st.pyplot(fig_p)
-        with col_des:
+        with c2:
+            st.write("**Identified Healthcare Deserts**")
             fig_d, ax_d = plt.subplots()
             annual_maps[max(years)].boundary.plot(ax=ax_d, color='black', linewidth=0.5)
-            deserts.plot(ax=ax_d, color='#e63946', alpha=0.7)
+            deserts.plot(ax=ax_d, color='red', alpha=0.7)
             ax_d.set_axis_off()
             st.pyplot(fig_d)
 
-        # 4. STAKEHOLDER TABLE
-        st.header("4. Seasonal Trends & Priority LGAs")
-        t1, t2 = st.tabs(["Seasonal Utilization", "Priority Intervention LGAs"])
-        with t1:
-            st.dataframe(seasonal_table.style.highlight_max(axis=1, color='#90ee90'), use_container_width=True)
-        with t2:
-            st.write("The following LGAs contain 'Desert' zones (Red areas on map) and require urgent health facility expansion:")
-            st.table(pd.DataFrame(deserts['NAME_2'].unique(), columns=["LGA Priority List"]))
+        # 4. DECISION TABLE
+        st.header("4. Priority Intervention List")
+        st.info("The following LGAs are classified as 'Under-Served' based on the 30km accessibility threshold. Authorities should prioritize these for PHC construction.")
+        priority_df = pd.DataFrame(deserts['NAME_2'].unique(), columns=["LGA Priority Name"])
+        st.table(priority_df)
     else:
-        st.error(f"Analysis failed: {res[4]}")
+        st.error(f"System Error: {res[3]}")
