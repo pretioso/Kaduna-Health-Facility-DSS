@@ -11,68 +11,70 @@ import streamlit as st
 import geopandas as gpd
 import pandas as pd
 import numpy as np
-import re
 from rasterstats import zonal_stats
-import tempfile
-import os
-from esda.moran import Moran
+import tempfile, os
 import libpysal as lp
+from esda.moran import Moran
 
 def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
     try:
-        # 1. POPULATION & RATE CALCULATION (Per 10,000 to avoid 0.000)
+        # --- 1. POPULATION & NAME CLEANING (Cell 3, 37, 12) ---
         with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
             tmp.write(population_tif.read())
             tmp_path = tmp.name
         stats = zonal_stats(lga_boundary, tmp_path, stats=["sum"])
-        lga_boundary["Population"] = [max(s["sum"], 1) if s and s["sum"] else 1000 for s in stats]
+        lga_boundary["Population"] = [s["sum"] if s and s["sum"] else 1 for s in stats]
         os.unlink(tmp_path)
+        
+        lga_boundary["NAME_2_UP"] = lga_boundary["NAME_2"].str.strip().str.upper()
 
-        # 2. TEMPORAL DATA PROCESSING
+        # --- 2. DATA MERGING & RATE PER 1000 (Cell 46) ---
         all_data = []
         for file in outpatient_files:
             df = pd.read_excel(file)
-            # Extract Year if not present
-            if 'Year' not in df.columns:
-                match = re.search(r'(\d{4})', file.name)
-                df['Year'] = int(match.group(1)) if match else 2024
-            # Clean LGA Names for matching
+            # Replicate Cell 12 Cleaning
             df["LGA"] = df["LGA"].astype(str).str.replace("^kd\s+", "", regex=True).str.strip().str.upper()
             all_data.append(df)
         
-        merged_df = pd.concat(all_data, ignore_index=True)
-        month_cols = [c for c in merged_df.columns if c not in ['LGA', 'Year']]
-        merged_df['Annual_Total'] = merged_df[month_cols].sum(axis=1)
-
-        # 3. SEASONALITY (Cell 73)
-        long_data = merged_df.melt(id_vars=["LGA", "Year"], value_vars=month_cols, var_name='Month', value_name='Count')
-        def get_season(m):
-            return "Dry/Harmattan" if m in ["Nov", "Dec", "Jan", "Feb", "Mar", "Apr"] else "Rainy"
-        long_data['Season'] = long_data['Month'].apply(get_season)
-
-        # 4. HEALTHCARE DESERTS (Cell 135)
-        # Using 30km buffer as a proxy for 60-min travel
-        fac_metric = facilities_df.to_crs(epsg=32632)
-        coverage = fac_metric.buffer(30000).union_all()
-        deserts = gpd.overlay(lga_boundary.to_crs(epsg=32632), gpd.GeoDataFrame(geometry=[coverage], crs=32632), how='difference')
-        underserved_list = deserts['NAME_2'].unique() if not deserts.empty else ["None Detected"]
-
-        # 5. ANNUAL RATE MAPS & MORAN'S I
-        lga_boundary["NAME_2_UP"] = lga_boundary["NAME_2"].str.upper()
+        raw_df = pd.concat(all_data, ignore_index=True)
+        month_cols = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
+        
+        # Calculate Annual Rates per Year for Maps
         annual_maps = {}
-        for yr in sorted(merged_df['Year'].unique()):
-            yr_data = merged_df[merged_df['Year'] == yr].groupby('LGA')['Annual_Total'].sum().reset_index()
-            map_data = lga_boundary.merge(yr_data, left_on='NAME_2_UP', right_on='LGA', how='left').fillna(0)
-            map_data['Rate_Per_10k'] = (map_data['Annual_Total'] / map_data['Population']) * 10000
-            annual_maps[yr] = map_data
+        for yr in sorted(raw_df['Year'].unique()):
+            yr_df = raw_df[raw_df['Year'] == yr].copy()
+            yr_df['Annual_Sum'] = yr_df[month_cols].sum(axis=1)
+            agg = yr_df.groupby('LGA')['Annual_Sum'].sum().reset_index()
+            merged = lga_boundary.merge(agg, left_on="NAME_2_UP", right_on="LGA", how="left").fillna(0)
+            merged[f'Rate_{yr}'] = (merged['Annual_Sum'] / merged['Population']) * 1000
+            annual_maps[yr] = merged
 
-        # Final Moran's I on latest year (Fixing the 0.000 error)
-        latest_map = annual_maps[max(annual_maps.keys())]
+        # --- 3. SEASONAL ANALYSIS (Cell 73) ---
+        long_df = raw_df.melt(id_vars=["LGA", "Year"], value_vars=month_cols, var_name='Month', value_name='Count')
+        long_df = long_df.merge(lga_boundary[['NAME_2_UP', 'Population']], left_on='LGA', right_on='NAME_2_UP')
+        long_df['Rate'] = (long_df['Count'] / long_df['Population']) * 1000
+        
+        def get_season(m):
+            if m in ["November", "December", "January", "February"]: return "Harmattan"
+            if m in ["March", "April"]: return "Hot-Dry"
+            return "Rainy Season"
+        
+        long_df['Season'] = long_df['Month'].apply(get_season)
+        seasonal_table = long_df.groupby(['LGA', 'Season'])['Rate'].mean().unstack().reset_index()
+        seasonal_table['Seasonal Peak'] = seasonal_table[['Harmattan', 'Hot-Dry', 'Rainy Season']].idxmax(axis=1)
+
+        # --- 4. MORAN'S I (Cell 61 - Replicating your -0.2554) ---
+        latest_map = annual_maps[2024]
         w = lp.weights.Queen.from_dataframe(latest_map)
         w.transform = 'R'
-        mi = Moran(latest_map['Rate_Per_10k'], w)
+        mi = Moran(latest_map['Rate_2024'], w)
 
-        return annual_maps, deserts, underserved_list, long_data, mi
+        # --- 5. DESERTS & INFRASTRUCTURE ---
+        roads_metric = roads_df.to_crs(epsg=32632)
+        facilities_metric = facilities_df.to_crs(epsg=32632)
+        coverage = facilities_metric.buffer(30000).union_all() # 30km/60min
+        deserts = gpd.overlay(lga_boundary.to_crs(epsg=32632), gpd.GeoDataFrame(geometry=[coverage], crs=32632), how='difference')
+        
+        return annual_maps, seasonal_table, mi, deserts, lga_boundary
     except Exception as e:
-        st.error(f"Logic Error: {e}")
-        return None, None, None, None, None
+        return None, None, None, None, str(e)
