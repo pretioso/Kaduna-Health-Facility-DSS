@@ -14,21 +14,38 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from engine_layer_py import run_analysis
 
-# Background Fix
+# Background orientation fix
 def set_bg(bin_file):
-    with open(bin_file, 'rb') as f:
-        bin_str = base64.b64encode(f.read()).decode()
-    st.markdown(f'''<style>.stApp {{background-image: url("data:image/png;base64,{bin_str}"); background-size: cover; background-position: top center; background-attachment: fixed;}} .main {{background-color: rgba(255, 255, 255, 0.85); padding: 2rem; border-radius: 10px;}}</style>''', unsafe_allow_html=True)
+    try:
+        with open(bin_file, 'rb') as f:
+            bin_str = base64.b64encode(f.read()).decode()
+        st.markdown(f'''
+            <style>
+            .stApp {{
+                background-image: url("data:image/png;base64,{bin_str}");
+                background-size: cover;
+                background-position: top center;
+                background-attachment: fixed;
+            }}
+            .main {{
+                background-color: rgba(255, 255, 255, 0.9);
+                padding: 2rem;
+                border-radius: 12px;
+            }}
+            </style>
+            ''', unsafe_allow_html=True)
+    except: pass
 
 set_bg('background.png')
 
-st.title("KADUNA STATE HEALTH FACILITY DECISION SUPPORT SYSTEM")
+st.title("KADUNA STATE HEALTH FACILITY DSS")
 
-# Sidebar Uploads
+# Sidebar
+st.sidebar.header("Upload Files")
 outpatient_files = st.sidebar.file_uploader("Outpatient Data", accept_multiple_files=True)
-health_facilities = st.sidebar.file_uploader("Facilities (Zip)", type=['zip'])
-lga_boundary = st.sidebar.file_uploader("Boundaries (Zip)", type=['zip'])
-roads = st.sidebar.file_uploader("Roads (gpkg)", type=['gpkg'])
+health_facilities = st.sidebar.file_uploader("Facilities (Zip/Shp)", type=['zip', 'shp'])
+lga_boundary = st.sidebar.file_uploader("Boundaries (Zip/Shp)", type=['zip', 'shp'])
+roads = st.sidebar.file_uploader("Road Network (gpkg)", type=['gpkg'])
 pop_raster = st.sidebar.file_uploader("Population (tif)", type=['tif'])
 
 if st.sidebar.button("Run Full System Analysis"):
@@ -40,22 +57,30 @@ if st.sidebar.button("Run Full System Analysis"):
         deserts, spatial_data, msg = run_analysis(f_gdf, r_gdf, l_gdf, outpatient_files, pop_raster)
         
         if spatial_data is not None:
-            # 1. Heatmap
+            st.success(msg)
+            
+            # --- TANGIBLE OUTPUT 1: HEATMAP ---
             st.header("I. Outpatient Distribution Heatmap")
-            fig, ax = plt.subplots()
-            spatial_data.plot(column='Total_Outpatient', cmap='OrRd', legend=True, ax=ax)
+            fig, ax = plt.subplots(figsize=(10, 6))
+            spatial_data.plot(column='Total_Outpatient', cmap='YlOrRd', legend=True, ax=ax)
+            ax.set_title("Heatmap of Outpatient Frequency (Latest Year)")
             st.pyplot(fig)
 
-            # 2. Trend
-            st.header("II. LGA Trend Analysis")
+            # --- TANGIBLE OUTPUT 2: TRENDS ---
+            st.header("II. LGA Temporal Trends")
             long_data = st.session_state['long_data']
-            lga = st.selectbox("Select LGA", long_data['LGA'].unique())
-            fig2, ax2 = plt.subplots()
-            sns.lineplot(data=long_data[long_data['LGA']==lga], x='Year', y='Count', ax=ax2)
+            lga_list = sorted(long_data['LGA'].unique())
+            selected_lga = st.selectbox("Select LGA for Trend Analysis", lga_list)
+            
+            fig2, ax2 = plt.subplots(figsize=(10, 4))
+            lga_df = long_data[long_data['LGA'] == selected_lga]
+            sns.lineplot(data=lga_df, x='Year', y='Count', marker='o', ax=ax2)
             st.pyplot(fig2)
 
-            # 3. Moran's I
-            st.header("III. Spatial Hotspots")
-            st.metric("Global Moran's I Index", round(st.session_state['moran_result'].I, 3))
+            # --- TANGIBLE OUTPUT 3: MORAN'S I ---
+            st.header("III. Spatial Clustering (Hotspots)")
+            moran_val = st.session_state['moran_result'].I
+            st.metric("Global Moran's I Index", round(moran_val, 4), 
+                      help=">0 indicates clustering (Hotspots), <0 indicates dispersion.")
     else:
-        st.error("Please upload all files.")
+        st.error("Missing files in sidebar. Please upload all 5 datasets.")
