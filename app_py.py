@@ -164,7 +164,7 @@ else:
                 * **Kajuru & Kaduna North**: Exceptional demand growth, require expansion for existing facilities.
                 * **Birnin Gwari & Kachia**: Focus construction within the identified Healthcare Deserts.
                 * **Giwa & Lere**: Scale-up staffing to match consistent outpatient growth.
-                * ** Sanga**: Construction of more healthcare facilities to cater for the growing population of the LGA.
+                * **Sanga**: Construction of more healthcare facilities to cater for the growing population of the LGA.
                 """)
                 
             else:
