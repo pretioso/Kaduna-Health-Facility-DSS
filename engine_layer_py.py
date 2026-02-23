@@ -10,61 +10,64 @@ Original file is located at
 import streamlit as st
 import geopandas as gpd
 import pandas as pd
-import numpy as np
-from rasterstats import zonal_stats
-import tempfile
-import os
-from esda.moran import Moran
-import libpysal as lp
+import base64
+import matplotlib.pyplot as plt
+from engine_layer_py import run_analysis
 
-def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
-    try:
-        # 1. Population & Rate Calculation (Notebook Cell 3, 46)
-        with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
-            tmp.write(population_tif.read())
-            tmp_path = tmp.name
-        stats = zonal_stats(lga_boundary, tmp_path, stats=["sum"])
-        lga_boundary["Population"] = [s["sum"] if s and s["sum"] else 1 for s in stats]
-        os.unlink(tmp_path)
+# 1. Background CSS (Top-center fix)
+def set_bg(bin_file):
+    with open(bin_file, 'rb') as f:
+        bin_str = base64.b64encode(f.read()).decode()
+    st.markdown(f'''<style>.stApp {{background-image: url("data:image/png;base64,{bin_str}"); background-size: cover; background-position: top center; background-attachment: fixed;}} .main {{background-color: rgba(255,255,255,0.9); padding: 25px; border-radius: 15px;}}</style>''', unsafe_allow_html=True)
 
-        # 2. Outpatient Rate (Notebook Cell 12, 46)
-        all_data = []
-        for file in outpatient_files:
-            df = pd.read_excel(file)
-            df["LGA"] = df["LGA"].astype(str).str.replace("^kd\s+", "", regex=True).str.strip().str.upper()
-            all_data.append(df)
+try: set_bg('background.png')
+except: pass
+
+st.title("KADUNA HEALTH STRATEGIC DSS")
+
+# 2. Sidebar Uploads
+with st.sidebar:
+    st.header("Strategic Input")
+    out_files = st.file_uploader("Outpatient Data", accept_multiple_files=True)
+    fac_file = st.file_uploader("Facilities (Zip)", type=['zip'])
+    lga_file = st.file_uploader("Boundaries (Zip)", type=['zip'])
+    road_file = st.file_uploader("Road Network (gpkg)", type=['gpkg'])
+    pop_file = st.file_uploader("Population (tif)", type=['tif'])
+    run_btn = st.button("Generate Priority Analysis")
+
+# 3. Execution and Result Display
+if run_btn and all([out_files, fac_file, lga_file, road_file, pop_file]):
+    with st.spinner("Calculating Health Utilization Rates..."):
+        spatial_data, moran_report, msg = run_analysis(gpd.read_file(fac_file), gpd.read_file(road_file), gpd.read_file(lga_file), out_files, pop_file)
+    
+    if spatial_data is not None:
+        # MAP OUTPUTS
+        st.header("I. Spatial Utilization Heatmaps")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Outpatient Rate (per 1,000)")
+            fig, ax = plt.subplots()
+            spatial_data.plot(column='Rate_Per_1000', cmap='RdYlGn', legend=True, ax=ax)
+            st.pyplot(fig)
+        with col2:
+            st.subheader("Population Distribution")
+            fig2, ax2 = plt.subplots()
+            spatial_data.plot(column='Population', cmap='Purples', legend=True, ax=ax2)
+            st.pyplot(fig2)
+
+        # TABULAR OUTPUTS
+        st.header("II. LGA Priority & Infrastructure Table")
+        priority_df = spatial_data[['NAME_2', 'Rate_Per_1000', 'Min_Distance_Apart', 'Recommended_Infrastructure']].sort_values('Rate_Per_1000')
+        st.dataframe(priority_df.style.background_gradient(cmap='Reds_r', subset=['Rate_Per_1000']), use_container_width=True)
+
+        st.header("III. Moran's I Spatial Report")
+        st.table(moran_report)
         
-        merged_df = pd.concat(all_data, ignore_index=True)
-        # Sum monthly columns for the latest year available
-        val_cols = [c for c in merged_df.columns if c not in ['LGA', 'Year']]
-        merged_df['Annual_Total'] = merged_df[val_cols].sum(axis=1)
-        latest_data = merged_df.groupby('LGA')['Annual_Total'].sum().reset_index()
-        
-        lga_boundary["NAME_2_UP"] = lga_boundary["NAME_2"].str.upper()
-        spatial_data = lga_boundary.merge(latest_data, left_on='NAME_2_UP', right_on='LGA', how='left').fillna(0)
-        spatial_data['Rate_Per_1000'] = (spatial_data['Annual_Total'] / spatial_data['Population']) * 1000
-
-        # 3. Moran's I Logic (Notebook Cell 61)
-        w = lp.weights.Queen.from_dataframe(spatial_data)
-        w.transform = 'R'
-        mi = Moran(spatial_data['Rate_Per_1000'], w)
-        
-        moran_report = pd.DataFrame({
-            "Metric": ["Moran's I Index", "P-Value", "Z-Score", "Spatial Pattern"],
-            "Value": [round(mi.I, 4), round(mi.p_sim, 4), round(mi.z_sim, 4), 
-                      "Clustered (Inequality)" if mi.I > 0 and mi.p_sim < 0.05 else "Random Distribution"]
-        })
-
-        # 4. Infrastructure Recommendations (Priority Logic)
-        def recommend_infra(rate):
-            if rate < 50: return "Comprehensive Hospital (Surgical/Maternity)"
-            if rate < 150: return "Primary Health Centre (Lab/Cold Chain)"
-            return "Basic Health Post (Immunization Hub)"
-
-        spatial_data['Priority_Rank'] = spatial_data['Rate_Per_1000'].rank(ascending=True)
-        spatial_data['Recommended_Infrastructure'] = spatial_data['Rate_Per_1000'].apply(recommend_infra)
-        spatial_data['Min_Distance_Apart'] = "5km - 8km (WHO standard)"
-
-        return spatial_data, moran_report, "Analysis Successful"
-    except Exception as e:
-        return None, None, str(e)
+        # Implication Logic
+        res_text = moran_report.iloc[3]['Value']
+        if "Clustered" in res_text:
+            st.warning("**STRATEGIC IMPLICATION:** Significant clustering detected. This indicates that health facility usage is not equitable across the state. Priority LGAs (Red in table) are underserved 'Cold Spots' that require immediate facility upgrading.")
+        else:
+            st.info("**STRATEGIC IMPLICATION:** Usage patterns appear random. Infrastructure distribution is currently meeting the population's geographic needs without systematic bias.")
+    else:
+        st.error(f"Error: {msg}")
