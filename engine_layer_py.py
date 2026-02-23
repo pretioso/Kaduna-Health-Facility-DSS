@@ -11,7 +11,6 @@ import streamlit as st
 import geopandas as gpd
 import pandas as pd
 import numpy as np
-import re
 from rasterstats import zonal_stats
 import tempfile
 import os
@@ -20,49 +19,56 @@ import libpysal as lp
 
 def run_analysis(facilities_df, roads_df, lga_boundary, outpatient_files, population_tif):
     try:
-        # --- 1. POPULATION EXTRACTION (Notebook Cell 3, 37) ---
+        # 1. Population & Rate Calculation (Notebook Cell 3, 46)
         with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
             tmp.write(population_tif.read())
             tmp_path = tmp.name
-        
         stats = zonal_stats(lga_boundary, tmp_path, stats=["sum"])
         lga_boundary["Population"] = [s["sum"] if s and s["sum"] else 1 for s in stats]
         os.unlink(tmp_path)
 
-        # --- 2. OUTPATIENT CLEANING (Notebook Cell 12, 46) ---
+        # 2. Outpatient Rate per 1,000 (Notebook Cell 46)
         all_data = []
         for file in outpatient_files:
             df = pd.read_excel(file)
-            if 'Year' not in df.columns:
-                match = re.search(r'(\d{4})', file.name)
-                df['Year'] = int(match.group(1)) if match else 2024
-            df["LGA"] = df["LGA"].str.replace("^kd\s+", "", regex=True).str.strip().str.upper()
+            df["LGA"] = df["LGA"].astype(str).str.replace("^kd\s+", "", regex=True).str.strip().str.upper()
             all_data.append(df)
         
         merged_df = pd.concat(all_data, ignore_index=True)
-        st.session_state['long_data'] = merged_df # Store for trends
+        latest_year = merged_df.groupby('LGA').sum(numeric_only=True).reset_index()
         
-        # Calculate Rates for latest year
-        latest = merged_df[merged_df['Year'] == merged_df['Year'].max()]
-        # Sum all month columns
-        val_cols = [c for c in latest.columns if c not in ['LGA', 'Year']]
-        latest['Total'] = latest[val_cols].sum(axis=1)
-        
-        # --- 3. SPATIAL JOIN & MORAN'S I (Notebook Cell 61, 87) ---
+        # Join and calculate Rate
         lga_boundary["NAME_2_UP"] = lga_boundary["NAME_2"].str.upper()
-        spatial_data = lga_boundary.merge(latest[['LGA', 'Total']], left_on='NAME_2_UP', right_on='LGA', how='left')
-        spatial_data['Rate'] = (spatial_data['Total'] / spatial_data['Population']) * 1000
+        # Sum all monthly columns to get annual total
+        val_cols = [c for c in latest_year.columns if c not in ['LGA', 'Year']]
+        latest_year['Annual_Total'] = latest_year[val_cols].sum(axis=1)
         
-        # Moran's I
+        spatial_data = lga_boundary.merge(latest_year[['LGA', 'Annual_Total']], left_on='NAME_2_UP', right_on='LGA')
+        spatial_data['Rate_Per_1000'] = (spatial_data['Annual_Total'] / spatial_data['Population']) * 1000
+
+        # 3. Moran's I Logic (Notebook Cell 61)
         w = lp.weights.Queen.from_dataframe(spatial_data.fillna(0))
-        st.session_state['moran'] = Moran(spatial_data['Rate'].fillna(0), w)
+        w.transform = 'R'
+        mi = Moran(spatial_data['Rate_Per_1000'].fillna(0), w)
+        
+        moran_table = pd.DataFrame({
+            "Metric": ["Moran's I Statistic", "P-Value", "Z-Score", "Result"],
+            "Value": [round(mi.I, 4), round(mi.p_sim, 4), round(mi.z_sim, 4), 
+                      "Clustered (Hotspot)" if mi.I > 0 and mi.p_sim < 0.05 else "Random/Dispersed"]
+        })
 
-        # --- 4. DESERTS (Notebook Cell 135) ---
-        fac_metric = facilities_df.to_crs(epsg=32632)
-        coverage = fac_metric.buffer(30000).union_all() # 30km coverage
-        deserts = gpd.overlay(lga_boundary.to_crs(epsg=32632), gpd.GeoDataFrame(geometry=[coverage], crs=32632), how='difference')
+        # 4. Infrastructure & Priority Logic
+        # Priority = High Population + Low Outpatient Rate
+        spatial_data['Priority_Rank'] = spatial_data['Rate_Per_1000'].rank(ascending=True)
+        
+        def get_infra(rate):
+            if rate < 50: return "Comprehensive Health Centre (Surgical Suite, Maternity Wing)"
+            if rate < 150: return "Primary Health Clinic (Cold Chain Storage, Basic Lab)"
+            return "Health Post (Mobile Outreach, Immunization Hub)"
 
-        return deserts, spatial_data, "Analysis Complete"
+        spatial_data['Recommended_Infrastructure'] = spatial_data['Rate_Per_1000'].apply(get_infra)
+        spatial_data['Suggested_Distance_Apart'] = "5km - 10km (Based on 60-min Travel Time)"
+
+        return spatial_data, moran_table, "Analysis Successful"
     except Exception as e:
-        st.error(f"Engine Failure: {e}")
         return None, None, str(e)
