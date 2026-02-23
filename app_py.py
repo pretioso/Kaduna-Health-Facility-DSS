@@ -8,79 +8,52 @@ Original file is located at
 """
 import streamlit as st
 import geopandas as gpd
-import pandas as pd
-import base64
 import matplotlib.pyplot as plt
 import seaborn as sns
 from engine_layer_py import run_analysis
 
-# Background orientation fix
-def set_bg(bin_file):
-    try:
-        with open(bin_file, 'rb') as f:
-            bin_str = base64.b64encode(f.read()).decode()
-        st.markdown(f'''
-            <style>
-            .stApp {{
-                background-image: url("data:image/png;base64,{bin_str}");
-                background-size: cover;
-                background-position: top center;
-                background-attachment: fixed;
-            }}
-            .main {{
-                background-color: rgba(255, 255, 255, 0.9);
-                padding: 2rem;
-                border-radius: 12px;
-            }}
-            </style>
-            ''', unsafe_allow_html=True)
-    except: pass
+# 1. Page Config & Persistence
+st.set_page_config(layout="wide")
+if 'analysis_results' not in st.session_state:
+    st.session_state['analysis_results'] = None
 
-set_bg('background.png')
+st.title("KADUNA HEALTH ANALYTICS")
 
-st.title("KADUNA STATE HEALTH FACILITY DSS")
+# 2. Sidebar Uploads
+with st.sidebar:
+    out_f = st.file_uploader("Outpatient Files", accept_multiple_files=True)
+    fac_f = st.file_uploader("Facilities (Zip)", type=['zip'])
+    lga_f = st.file_uploader("Boundaries (Zip)", type=['zip'])
+    
+    if st.button("Run Full Analysis"):
+        if out_f and fac_f and lga_f:
+            with st.spinner("Processing..."):
+                res, msg = run_analysis(gpd.read_file(fac_f), None, gpd.read_file(lga_f), out_f)
+                st.session_state['analysis_results'] = res
+                st.session_state['msg'] = msg
+        else:
+            st.error("Please upload all files first.")
 
-# Sidebar
-st.sidebar.header("Upload Files")
-outpatient_files = st.sidebar.file_uploader("Outpatient Data", accept_multiple_files=True)
-health_facilities = st.sidebar.file_uploader("Facilities (Zip/Shp)", type=['zip', 'shp'])
-lga_boundary = st.sidebar.file_uploader("Boundaries (Zip/Shp)", type=['zip', 'shp'])
-roads = st.sidebar.file_uploader("Road Network (gpkg)", type=['gpkg'])
-pop_raster = st.sidebar.file_uploader("Population (tif)", type=['tif'])
+# 3. Persistent Output Rendering
+if st.session_state['analysis_results'] is not None:
+    spatial_data = st.session_state['analysis_results']
+    st.success(st.session_state['msg'])
 
-if st.sidebar.button("Run Full System Analysis"):
-    if all([outpatient_files, health_facilities, lga_boundary, roads, pop_raster]):
-        f_gdf = gpd.read_file(health_facilities)
-        l_gdf = gpd.read_file(lga_boundary)
-        r_gdf = gpd.read_file(roads)
-        
-        deserts, spatial_data, msg = run_analysis(f_gdf, r_gdf, l_gdf, outpatient_files, pop_raster)
-        
-        if spatial_data is not None:
-            st.success(msg)
-            
-            # --- TANGIBLE OUTPUT 1: HEATMAP ---
-            st.header("I. Outpatient Distribution Heatmap")
-            fig, ax = plt.subplots(figsize=(10, 6))
-            spatial_data.plot(column='Total_Outpatient', cmap='YlOrRd', legend=True, ax=ax)
-            ax.set_title("Heatmap of Outpatient Frequency (Latest Year)")
-            st.pyplot(fig)
+    col1, col2 = st.columns(2)
 
-            # --- TANGIBLE OUTPUT 2: TRENDS ---
-            st.header("II. LGA Temporal Trends")
-            long_data = st.session_state['long_data']
-            lga_list = sorted(long_data['LGA'].unique())
-            selected_lga = st.selectbox("Select LGA for Trend Analysis", lga_list)
-            
-            fig2, ax2 = plt.subplots(figsize=(10, 4))
-            lga_df = long_data[long_data['LGA'] == selected_lga]
-            sns.lineplot(data=lga_df, x='Year', y='Count', marker='o', ax=ax2)
-            st.pyplot(fig2)
+    with col1:
+        st.subheader("I. Heatmap")
+        fig, ax = plt.subplots()
+        spatial_data.plot(column='Total_Outpatient', cmap='OrRd', legend=True, ax=ax)
+        st.pyplot(fig)
 
-            # --- TANGIBLE OUTPUT 3: MORAN'S I ---
-            st.header("III. Spatial Clustering (Hotspots)")
-            moran_val = st.session_state['moran_result'].I
-            st.metric("Global Moran's I Index", round(moran_val, 4), 
-                      help=">0 indicates clustering (Hotspots), <0 indicates dispersion.")
-    else:
-        st.error("Missing files in sidebar. Please upload all 5 datasets.")
+    with col2:
+        st.subheader("II. LGA Trends")
+        long_data = st.session_state['long_data']
+        lga = st.selectbox("Choose LGA", sorted(long_data['LGA'].unique()))
+        fig2, ax2 = plt.subplots()
+        sns.lineplot(data=long_data[long_data['LGA']==lga], x='Year', y='Count', marker='o', ax=ax2)
+        st.pyplot(fig2)
+
+    st.subheader("III. Hotspot Statistics")
+    st.metric("Global Moran's I", round(st.session_state['moran_result'].I, 3))
